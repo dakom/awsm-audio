@@ -8,6 +8,7 @@ members = [
     "packages/mcp",
     "packages/worklets/bitcrusher",
     "packages/worklets/drive",
+    "packages/worklets/gain",
     "packages/worklets/ringmod",
 ]
 resolver = "2"

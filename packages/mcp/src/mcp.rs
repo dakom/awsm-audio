@@ -9,13 +9,17 @@
 //! so every `EditorCommand` / `EditorQuery` variant is reachable even when its
 //! payload references schema types without a JSON schema.
 
+use base64::{Engine, engine::general_purpose::STANDARD};
 use rmcp::handler::server::router::tool::ToolRouter;
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{
-    CallToolResult, Content, LoggingLevel, LoggingMessageNotificationParam, ServerCapabilities,
+    AnnotateAble, CallToolResult, Content, GetPromptRequestParams, GetPromptResult,
+    ListPromptsResult, ListResourcesResult, LoggingLevel, LoggingMessageNotificationParam,
+    PaginatedRequestParams, Prompt, PromptMessage, PromptMessageRole, RawResource,
+    ReadResourceRequestParams, ReadResourceResult, ResourceContents, ServerCapabilities,
     ServerInfo,
 };
-use rmcp::service::NotificationContext;
+use rmcp::service::{NotificationContext, RequestContext};
 use rmcp::{
     ErrorData as McpError, RoleServer, ServerHandler, schemars, tool, tool_handler, tool_router,
 };
@@ -127,6 +131,23 @@ pub struct BatchJsonParams {
 pub struct QueryJsonParams {
     /// A raw `EditorQuery` as JSON (internally tagged by `"query"`/`"args"`).
     pub query: Value,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct AttachWasmParams {
+    /// AudioWorklet node id (UUID). Create one first with add_node(kind:
+    /// audio_worklet).
+    pub node: String,
+    /// Path to the compiled .wasm (e.g.
+    /// target/wasm32-unknown-unknown/release/foo.wasm). The server reads + encodes
+    /// it.
+    #[serde(default)]
+    pub wasm_path: Option<String>,
+    /// Or inline base64 (standard, padded) if you already encoded it.
+    #[serde(default)]
+    pub wasm_base64: Option<String>,
+    #[serde(default)]
+    pub label: Option<String>,
 }
 
 // ──────────────────────────────── tools ─────────────────────────────────────
@@ -340,6 +361,51 @@ impl EditorMcp {
         .await
     }
 
+    // ── worklet authoring ────────────────────────────────────────────────────
+
+    #[tool(
+        description = "Attach a compiled WASM DSP module to an AudioWorklet node. \
+        Author a crate against awsm-audio-worklet (see the awsm://docs/worklet-abi \
+        resource), `cargo build --target wasm32-unknown-unknown --release`, then \
+        pass the .wasm path here. On success the node's discovered params show up \
+        in get_snapshot. A bad module returns the compile/ABI error."
+    )]
+    async fn attach_wasm(
+        &self,
+        Parameters(p): Parameters<AttachWasmParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let node = parse_node(&p.node)?;
+        let wasm_base64 = match (p.wasm_base64, p.wasm_path) {
+            (Some(b64), _) => b64,
+            (None, Some(path)) => {
+                let bytes = std::fs::read(&path)
+                    .map_err(|e| McpError::internal_error(format!("read {path}: {e}"), None))?;
+                STANDARD.encode(bytes)
+            }
+            (None, None) => {
+                return Err(McpError::invalid_params(
+                    "need wasm_path or wasm_base64",
+                    None,
+                ));
+            }
+        };
+        let label = p.label.unwrap_or_else(|| "module".to_string());
+        match self
+            .req(Request::AttachWasm {
+                node,
+                wasm_base64,
+                label,
+            })
+            .await?
+        {
+            Response::Ok => Ok(text(
+                "ok — params discovered; call get_snapshot to see them",
+            )),
+            Response::Err(e) => Err(McpError::internal_error(e, None)),
+            other => Err(unexpected(other)),
+        }
+    }
+
     // ── generic escape hatches ───────────────────────────────────────────────
 
     #[tool(description = "Dispatch a raw EditorCommand (escape hatch for any \
@@ -441,13 +507,19 @@ impl ServerHandler for EditorMcp {
         // `ServerInfo` is `#[non_exhaustive]` in rmcp 1.x — build from Default and
         // set the public fields rather than a struct literal.
         let mut info = ServerInfo::default();
-        info.capabilities = ServerCapabilities::builder().enable_tools().build();
+        info.capabilities = ServerCapabilities::builder()
+            .enable_tools()
+            .enable_resources()
+            .enable_prompts()
+            .build();
         info.instructions = Some(
             "Drive the awsm-audio node-graph WebAudio editor. Call get_snapshot to \
              discover node/sample ids, mutate with the graph/sequencer/arrangement \
              tools (or dispatch_command / dispatch_batch for anything without a \
              dedicated tool), bounce a Sound and call render_wav / wav_stats / \
-             waveform to inspect the result."
+             waveform to inspect the result. To add a custom DSP node, read the \
+             awsm://docs/worklet-abi resource, author + build a worklet crate, and \
+             attach it with the attach_wasm tool."
                 .to_string(),
         );
         info
@@ -483,7 +555,154 @@ impl ServerHandler for EditorMcp {
             }
         });
     }
+
+    // ── resources: the worklet-authoring guide (read-only) ───────────────────
+    async fn list_resources(
+        &self,
+        _req: Option<PaginatedRequestParams>,
+        _ctx: RequestContext<RoleServer>,
+    ) -> Result<ListResourcesResult, McpError> {
+        let mut r = RawResource::new("awsm://docs/worklet-abi", "Worklet ABI");
+        r.description = Some(
+            "How to author a WASM DSP worklet against awsm-audio-worklet, build it, \
+             and attach it with attach_wasm — with a minimal Gain example."
+                .to_string(),
+        );
+        r.mime_type = Some("text/markdown".to_string());
+        Ok(ListResourcesResult::with_all_items(vec![r.no_annotation()]))
+    }
+
+    async fn read_resource(
+        &self,
+        req: ReadResourceRequestParams,
+        _ctx: RequestContext<RoleServer>,
+    ) -> Result<ReadResourceResult, McpError> {
+        let body = match req.uri.as_str() {
+            "awsm://docs/worklet-abi" => WORKLET_ABI_DOC,
+            other => {
+                return Err(McpError::resource_not_found(
+                    format!("unknown resource {other}"),
+                    None,
+                ));
+            }
+        };
+        Ok(ReadResourceResult::new(vec![ResourceContents::text(
+            body, req.uri,
+        )]))
+    }
+
+    // ── prompts: the worklet-authoring workflow ──────────────────────────────
+    async fn list_prompts(
+        &self,
+        _req: Option<PaginatedRequestParams>,
+        _ctx: RequestContext<RoleServer>,
+    ) -> Result<ListPromptsResult, McpError> {
+        Ok(ListPromptsResult::with_all_items(vec![Prompt::new(
+            "author_worklet",
+            Some("Author a custom WASM DSP worklet end-to-end and attach it to a node."),
+            None,
+        )]))
+    }
+
+    async fn get_prompt(
+        &self,
+        req: GetPromptRequestParams,
+        _ctx: RequestContext<RoleServer>,
+    ) -> Result<GetPromptResult, McpError> {
+        match req.name.as_str() {
+            "author_worklet" => Ok(GetPromptResult::new(vec![PromptMessage::new_text(
+                PromptMessageRole::User,
+                WORKLET_ABI_DOC,
+            )])
+            .with_description("Author + attach a custom WASM DSP worklet.")),
+            other => Err(McpError::invalid_params(
+                format!("unknown prompt {other}"),
+                None,
+            )),
+        }
+    }
 }
+
+/// The worklet-authoring guide served both as the `awsm://docs/worklet-abi`
+/// resource and the `author_worklet` prompt, so an agent can write a correct
+/// crate without reading the repo.
+const WORKLET_ABI_DOC: &str = r#"# Authoring an awsm-audio WASM DSP worklet
+
+An AudioWorklet node runs a **native Rust → wasm** DSP processor you author,
+compile, and attach. The MCP server only relays the bytes — you compile locally
+(so you get cargo's errors directly) and pass the `.wasm` to `attach_wasm`.
+
+## 1. Author a crate
+
+`Cargo.toml`:
+
+```toml
+[package]
+name = "my-worklet"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+awsm-audio-worklet = { path = "PATH/TO/packages/crates/worklet" }
+```
+
+`src/lib.rs` — implement `Processor` and call `awsm_worklet!` exactly once:
+
+```rust
+use awsm_audio_worklet::{awsm_worklet, ParamDesc, Params, Processor};
+
+struct Gain;
+
+impl Processor for Gain {
+    // name, min, max, default — each becomes a labelled, automatable knob.
+    const PARAMS: &'static [ParamDesc] = &[ParamDesc::new("gain", 0.0, 2.0, 1.0)];
+
+    fn new(_sample_rate: f32) -> Self { Gain }
+
+    // Per-channel (planar) slices, equal length (<= 128 frames). NO allocation.
+    fn process(&mut self, input: &[&[f32]], output: &mut [&mut [f32]], params: &Params) {
+        let g = params.get(0);
+        for ch in 0..output.len() {
+            for (o, &i) in output[ch].iter_mut().zip(input[ch]) {
+                *o = i * g;
+            }
+        }
+    }
+}
+
+awsm_worklet!(Gain);
+```
+
+ABI rules: stereo (`CHANNELS = 2`), <= `MAX_FRAMES` (128) frames/quantum,
+<= `MAX_PARAMS` (32) params, no allocation in `process`. Use the crate's
+`math::{sin, tanh}` instead of `f32::sin`/`tanh` (those pull extra wasm symbols).
+See `packages/worklets/{gain,ringmod,drive,bitcrusher}` for worked examples.
+
+## 2. Compile
+
+```sh
+cargo build -p my-worklet --target wasm32-unknown-unknown --release
+# → target/wasm32-unknown-unknown/release/my_worklet.wasm
+```
+
+A compile error here is yours to fix — it shows up in your own build output.
+
+## 3. Attach
+
+1. `add_node` an `audio_worklet` node (e.g. `dispatch_command` with
+   `{"cmd":"add_node","args":{"kind":{"audio_worklet":{}},"x":0,"y":0}}`), then
+   `get_snapshot` to read its id.
+2. `attach_wasm { node, wasm_path }` (or `wasm_base64`). On success the editor
+   compiles the module, discovers its params, and binds it.
+3. `get_snapshot` again — the node now lists the discovered params, editable /
+   automatable / modulation-targetable like any field. Wire it up and
+   `render_wav` / `wav_stats` to hear/inspect the result.
+
+A module that compiles but violates the ABI returns the error from `attach_wasm`.
+"#;
 
 fn text(s: impl Into<String>) -> CallToolResult {
     CallToolResult::success(vec![Content::text(s.into())])

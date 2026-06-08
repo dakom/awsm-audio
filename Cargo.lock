@@ -219,6 +219,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "awsm-audio-worklet-gain"
+version = "0.1.0"
+dependencies = [
+ "awsm-audio-worklet",
+]
+
+[[package]]
 name = "awsm-audio-worklet-ringmod"
 version = "0.1.0"
 dependencies = [
