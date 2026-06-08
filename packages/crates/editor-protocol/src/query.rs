@@ -94,6 +94,42 @@ pub struct WavStats {
     pub sample_rate: u32,
 }
 
+impl WavStats {
+    /// Compute stats over rendered PCM (`channels[ch][frame]`): peak = max abs
+    /// across all channels; rms = sqrt(mean of squares); duration = frames / rate.
+    /// Pure f32/f64 math — natively testable, no audio/DOM deps.
+    pub fn from_pcm(channels: &[Vec<f32>], sample_rate: u32) -> Self {
+        let frames = channels.iter().map(|c| c.len()).max().unwrap_or(0);
+        let mut peak = 0.0f32;
+        let mut sum_sq = 0.0f64;
+        let mut count = 0u64;
+        for ch in channels {
+            for &s in ch {
+                peak = peak.max(s.abs());
+                sum_sq += (s as f64) * (s as f64);
+                count += 1;
+            }
+        }
+        let rms = if count > 0 {
+            (sum_sq / count as f64).sqrt() as f32
+        } else {
+            0.0
+        };
+        let duration_secs = if sample_rate > 0 {
+            frames as f64 / sample_rate as f64
+        } else {
+            0.0
+        };
+        Self {
+            duration_secs,
+            peak,
+            rms,
+            channels: channels.len() as u32,
+            sample_rate,
+        }
+    }
+}
+
 /// Per-bucket min/max of a mono-summed render, normalized to [-1, 1].
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WaveformEnvelope {
@@ -102,4 +138,56 @@ pub struct WaveformEnvelope {
     /// `min[i] <= max[i]`, one pair per bucket, left-to-right in time.
     pub min: Vec<f32>,
     pub max: Vec<f32>,
+}
+
+impl WaveformEnvelope {
+    /// Down-sample rendered PCM into `buckets` min/max columns over the channel
+    /// mean (so it stays in [-1, 1]). Pure math — natively testable.
+    pub fn from_pcm(channels: &[Vec<f32>], sample_rate: u32, buckets: u32) -> Self {
+        let frames = channels.iter().map(|c| c.len()).max().unwrap_or(0);
+        let n = channels.len().max(1) as f32;
+        // Channel mean per frame.
+        let mono: Vec<f32> = (0..frames)
+            .map(|i| {
+                let s: f32 = channels
+                    .iter()
+                    .map(|c| c.get(i).copied().unwrap_or(0.0))
+                    .sum();
+                s / n
+            })
+            .collect();
+
+        let buckets = buckets.max(1) as usize;
+        let mut min = Vec::with_capacity(buckets);
+        let mut max = Vec::with_capacity(buckets);
+        for b in 0..buckets {
+            let start = b * frames / buckets;
+            let end = ((b + 1) * frames / buckets).clamp(start, frames);
+            let slice = &mono[start..end];
+            if slice.is_empty() {
+                min.push(0.0);
+                max.push(0.0);
+            } else {
+                let mut lo = f32::INFINITY;
+                let mut hi = f32::NEG_INFINITY;
+                for &s in slice {
+                    lo = lo.min(s);
+                    hi = hi.max(s);
+                }
+                min.push(lo.clamp(-1.0, 1.0));
+                max.push(hi.clamp(-1.0, 1.0));
+            }
+        }
+        let duration_secs = if sample_rate > 0 {
+            frames as f64 / sample_rate as f64
+        } else {
+            0.0
+        };
+        Self {
+            sample_rate,
+            duration_secs,
+            min,
+            max,
+        }
+    }
 }

@@ -219,3 +219,60 @@ fn arrange_paste_clip_round_trip() {
     };
     json_round_trip(&cmd);
 }
+
+// ── pure WAV-math helpers (the unattended coverage for the readback numbers) ──
+
+fn sine(freq: f32, secs: f32, rate: u32) -> Vec<Vec<f32>> {
+    let n = (secs * rate as f32) as usize;
+    let ch: Vec<f32> = (0..n)
+        .map(|i| {
+            let t = i as f32 / rate as f32;
+            (2.0 * core::f32::consts::PI * freq * t).sin()
+        })
+        .collect();
+    vec![ch]
+}
+
+#[test]
+fn wav_stats_of_unit_sine() {
+    // A full-scale 1 kHz sine: peak ≈ 1.0, rms ≈ 1/√2 ≈ 0.707, duration ≈ 1.0s.
+    let s = WavStats::from_pcm(&sine(1000.0, 1.0, 48_000), 48_000);
+    assert_eq!(s.channels, 1);
+    assert_eq!(s.sample_rate, 48_000);
+    assert!(
+        (s.duration_secs - 1.0).abs() < 0.01,
+        "duration {}",
+        s.duration_secs
+    );
+    assert!((s.peak - 1.0).abs() < 0.01, "peak {}", s.peak);
+    assert!((s.rms - 0.707).abs() < 0.02, "rms {}", s.rms);
+}
+
+#[test]
+fn wav_stats_of_silence() {
+    let s = WavStats::from_pcm(&[vec![0.0f32; 1000]], 44_100);
+    assert_eq!(s.peak, 0.0);
+    assert_eq!(s.rms, 0.0);
+}
+
+#[test]
+fn waveform_buckets_within_bounds() {
+    let w = WaveformEnvelope::from_pcm(&sine(1000.0, 1.0, 48_000), 48_000, 16);
+    assert_eq!(w.min.len(), 16);
+    assert_eq!(w.max.len(), 16);
+    for i in 0..16 {
+        assert!(w.min[i] <= w.max[i], "min>max at {i}");
+        assert!(w.min[i] >= -1.0 && w.max[i] <= 1.0, "out of range at {i}");
+    }
+}
+
+#[test]
+fn waveform_of_ramp_is_monotonic() {
+    // A 0→1 ramp: each later bucket's max should not decrease.
+    let n = 16_000usize;
+    let ramp: Vec<f32> = (0..n).map(|i| i as f32 / n as f32).collect();
+    let w = WaveformEnvelope::from_pcm(&[ramp], 16_000, 8);
+    for i in 1..w.max.len() {
+        assert!(w.max[i] >= w.max[i - 1], "bucket {i} not monotonic");
+    }
+}

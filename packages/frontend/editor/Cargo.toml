@@ -27,8 +27,15 @@ dominator = { workspace = true }
 futures-signals = { workspace = true }
 
 serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true }
 toml = { workspace = true }
 uuid = { version = "1.11.0", features = ["v4", "serde", "js"] }
+
+# MCP remote-control link: the editor dials out to the native MCP server over
+# WebTransport, fetching the cert-hash discovery doc via gloo-net.
+web-transport = "0.10.5"
+gloo-net = { version = "0.6", features = ["http"] }
+url = "2"
 
 # Additive on top of the workspace web-sys baseline: pointer/wheel/keyboard
 # events and DomRect for the pan/zoom canvas coordinate math.

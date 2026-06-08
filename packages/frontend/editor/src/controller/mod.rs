@@ -3121,6 +3121,28 @@ impl EditorController {
         Some((job, sample.name.clone()))
     }
 
+    /// Render a Sound (or the project root when `None`) offline to PCM, without
+    /// storing it — the shared entry point for the MCP WAV readbacks
+    /// (`RenderWav`/`WavStats`/`Waveform`). Reuses [`bounce_job_for`] +
+    /// [`awsm_audio_player::bounce::render`], the same path Bounce/export use; an
+    /// optional `sample_rate` overrides the bounce rate.
+    pub async fn render_pcm(
+        &self,
+        sample: Option<awsm_audio_schema::SampleId>,
+        sample_rate: Option<f32>,
+    ) -> Result<(Vec<Vec<f32>>, u32), String> {
+        let id = sample.unwrap_or_else(|| *self.root.borrow());
+        let (mut job, _label) = self
+            .bounce_job_for(id)
+            .ok_or_else(|| "nothing to render".to_string())?;
+        if let Some(sr) = sample_rate {
+            job.sample_rate = sr;
+        }
+        awsm_audio_player::bounce::render(job)
+            .await
+            .map_err(|e| format!("{e}"))
+    }
+
     /// Render a Sound to an audio buffer (offline) and store it as the sample's
     /// bounce — so arrangement clips can play + draw it. Async; bumps `samples_rev`
     /// when done. No-op for an Arrangement sample.
@@ -4487,47 +4509,66 @@ impl EditorController {
     /// discover params, register (compiled in the player, base64 source here), and
     /// wire it onto the node. Shared by the file picker and the MCP/command seam.
     pub fn attach_wasm_bytes(&self, node: NodeId, bytes: Vec<u8>, label: String) {
+        let ctrl = self.clone();
+        wasm_bindgen_futures::spawn_local(async move {
+            if let Err(e) = ctrl.attach_wasm_bytes_async(node, bytes, label).await {
+                tracing::error!("attach wasm failed: {e}");
+            }
+        });
+    }
+
+    /// Fallible async variant of [`attach_wasm_bytes`]. Compiles the module,
+    /// discovers its params, registers it, and wires it onto the node, returning
+    /// the compile/ABI error (a human-readable string) instead of only logging
+    /// it. The MCP `AttachWasm` path awaits this so a bad module surfaces to the
+    /// agent; the file picker keeps the fire-and-forget [`attach_wasm_bytes`]
+    /// wrapper.
+    pub async fn attach_wasm_bytes_async(
+        &self,
+        node: NodeId,
+        bytes: Vec<u8>,
+        label: String,
+    ) -> Result<(), String> {
         if !self.ensure_player() {
-            return;
+            return Err("audio player unavailable".into());
         }
         let asset = awsm_audio_schema::AssetId::new();
         let player = self.player.clone();
-        let ctrl = self.clone();
-        wasm_bindgen_futures::spawn_local(async move {
-            if !ctrl.ensure_worklet_shim(&player).await {
-                return;
+        if !self.ensure_worklet_shim(&player).await {
+            return Err("worklet shim failed to load".into());
+        }
+        let u8 = js_sys::Uint8Array::from(bytes.as_slice());
+        let module = match wasm_bindgen_futures::JsFuture::from(
+            awsm_audio_player::Player::compile_module(&u8),
+        )
+        .await
+        {
+            Ok(m) => m.unchecked_into::<js_sys::WebAssembly::Module>(),
+            Err(e) => {
+                return Err(format!(
+                    "WebAssembly.compile failed (not a valid module?): {e:?}"
+                ));
             }
-            let u8 = js_sys::Uint8Array::from(bytes.as_slice());
-            let module = match wasm_bindgen_futures::JsFuture::from(
-                awsm_audio_player::Player::compile_module(&u8),
-            )
-            .await
-            {
-                Ok(m) => m.unchecked_into::<js_sys::WebAssembly::Module>(),
-                Err(e) => {
-                    tracing::error!("WebAssembly.compile failed (not a valid module?): {e:?}");
-                    return;
-                }
-            };
+        };
 
-            // Discover params (instantiate once on the main thread).
-            let params = discover_params(&module);
+        // Discover params (instantiate once on the main thread).
+        let params = discover_params(&module);
 
-            // Register: compiled module in the player, serializable source here.
-            if let Some(p) = player.borrow_mut().as_mut() {
-                p.store_module(asset, module);
-            }
-            let b64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &bytes);
-            ctrl.wasm_assets.borrow_mut().insert(
-                asset,
-                awsm_audio_schema::WasmAsset {
-                    id: asset,
-                    label: Some(label.clone()),
-                    source: awsm_audio_schema::WasmSource::Base64(b64),
-                },
-            );
-            ctrl.set_node_module(node, asset, label, params);
-        });
+        // Register: compiled module in the player, serializable source here.
+        if let Some(p) = player.borrow_mut().as_mut() {
+            p.store_module(asset, module);
+        }
+        let b64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &bytes);
+        self.wasm_assets.borrow_mut().insert(
+            asset,
+            awsm_audio_schema::WasmAsset {
+                id: asset,
+                label: Some(label.clone()),
+                source: awsm_audio_schema::WasmSource::Base64(b64),
+            },
+        );
+        self.set_node_module(node, asset, label, params);
+        Ok(())
     }
 
     /// Ensure the worklet shim has been added to the player's context. Returns
