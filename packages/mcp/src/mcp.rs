@@ -1,0 +1,508 @@
+//! The rmcp tool layer. Each tool is a thin typed wrapper that builds a protocol
+//! [`Request`] and relays it to the attached editor over the WebTransport link,
+//! then shapes the [`Response`] into an MCP result. All editor mutation flows
+//! through `EditorController` on the far side; this layer only translates.
+//!
+//! Coverage: discovery/read queries, the WAV readback surface (render_wav /
+//! wav_stats / waveform), transport, a few ergonomic typed mutators, and the
+//! generic escape hatches (`dispatch_command` / `dispatch_batch` / `run_query`)
+//! so every `EditorCommand` / `EditorQuery` variant is reachable even when its
+//! payload references schema types without a JSON schema.
+
+use rmcp::handler::server::router::tool::ToolRouter;
+use rmcp::handler::server::wrapper::Parameters;
+use rmcp::model::{
+    CallToolResult, Content, LoggingLevel, LoggingMessageNotificationParam, ServerCapabilities,
+    ServerInfo,
+};
+use rmcp::service::NotificationContext;
+use rmcp::{
+    ErrorData as McpError, RoleServer, ServerHandler, schemars, tool, tool_handler, tool_router,
+};
+use serde_json::Value;
+
+use awsm_audio_editor_protocol::schema::{NodeId, SampleId};
+use awsm_audio_editor_protocol::{EditorCommand, EditorQuery, FieldValue, Request, Response};
+
+use crate::link::EditorLink;
+
+/// The MCP tool provider. Cheap to clone (the link is an `Arc` handle).
+#[derive(Clone)]
+pub struct EditorMcp {
+    link: EditorLink,
+    // Populated by `Self::tool_router()` and consumed by the `#[tool_handler]`
+    // generated routing; the dead-code lint can't see that use.
+    #[allow(dead_code)]
+    tool_router: ToolRouter<EditorMcp>,
+}
+
+// ───────────────────────────── parameter types ──────────────────────────────
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct SampleArg {
+    /// Target Sound/sample UUID (from `list_samples`). Omit to use the project
+    /// root.
+    #[serde(default)]
+    pub sample: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct SampleReq {
+    /// Target sample UUID (from `list_samples`).
+    pub sample: String,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct NodeArg {
+    /// Target node UUID (from `get_snapshot`'s `graph`/`layout` ids).
+    pub node: String,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct RenderWavParams {
+    /// Sound to render. Omit to render the project root.
+    #[serde(default)]
+    pub sample: Option<String>,
+    /// Override the bounce sample rate (Hz).
+    #[serde(default)]
+    pub sample_rate: Option<f32>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct WaveformParams {
+    /// Sound to render. Omit to render the project root.
+    #[serde(default)]
+    pub sample: Option<String>,
+    /// Number of min/max buckets (envelope columns) to return.
+    pub buckets: u32,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct AddNodeParams {
+    /// A schema `NodeKind` value as JSON (the same shape `get_snapshot` returns
+    /// in `graph.nodes[].kind`, e.g. `{"gain":{"gain":1.0}}`). The editor mints
+    /// the node id — read it back from a follow-up `get_snapshot`.
+    pub kind: Value,
+    pub x: f64,
+    pub y: f64,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct ConnectParams {
+    /// Source node UUID.
+    pub from: String,
+    /// Source output port index.
+    #[serde(default)]
+    pub from_output: u32,
+    /// Destination node UUID.
+    pub to: String,
+    /// Destination input port index.
+    #[serde(default)]
+    pub to_input: u32,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct SetFieldParams {
+    /// Target node UUID.
+    pub node: String,
+    /// Field key (see the editor's `fields` reflection).
+    pub key: String,
+    /// Numeric value (most fields). For text/bool fields use `dispatch_command`.
+    pub value: f64,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct CommandJsonParams {
+    /// A raw `EditorCommand` as JSON (internally tagged by `"cmd"`/`"args"`).
+    pub command: Value,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct BatchJsonParams {
+    /// A list of raw `EditorCommand`s, applied in order in one round-trip.
+    pub commands: Vec<Value>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct QueryJsonParams {
+    /// A raw `EditorQuery` as JSON (internally tagged by `"query"`/`"args"`).
+    pub query: Value,
+}
+
+// ──────────────────────────────── tools ─────────────────────────────────────
+
+#[tool_router]
+impl EditorMcp {
+    pub fn new(link: EditorLink) -> Self {
+        Self {
+            link,
+            tool_router: Self::tool_router(),
+        }
+    }
+
+    // ── discovery / read ────────────────────────────────────────────────────
+
+    #[tool(
+        description = "Full editor snapshot: graph (nodes + connections), node \
+        layout, camera, selection, and the active arrangement. The starting point \
+        for discovering node/sample ids."
+    )]
+    async fn get_snapshot(&self) -> Result<CallToolResult, McpError> {
+        self.query(EditorQuery::Snapshot).await
+    }
+
+    #[tool(description = "List every sample (id, name, kind, root/active flags).")]
+    async fn list_samples(&self) -> Result<CallToolResult, McpError> {
+        self.query(EditorQuery::Samples).await
+    }
+
+    #[tool(description = "List every bounceable Sound with its bounce status + \
+        bounced duration.")]
+    async fn list_assets(&self) -> Result<CallToolResult, McpError> {
+        self.query(EditorQuery::Assets).await
+    }
+
+    #[tool(
+        description = "The active sample's arrangement (tracks + clips), if it \
+        is an Arrangement."
+    )]
+    async fn get_arrangement(&self) -> Result<CallToolResult, McpError> {
+        self.query(EditorQuery::Arrangement).await
+    }
+
+    #[tool(description = "Live transport state: playing / peak / playhead / \
+        audio-context state.")]
+    async fn get_transport(&self) -> Result<CallToolResult, McpError> {
+        self.query(EditorQuery::Transport).await
+    }
+
+    #[tool(description = "One Sound's bounce status (none / clean / dirty).")]
+    async fn get_bounce_status(
+        &self,
+        Parameters(p): Parameters<SampleReq>,
+    ) -> Result<CallToolResult, McpError> {
+        self.query(EditorQuery::BounceStatus {
+            sample: parse_sample(&p.sample)?,
+        })
+        .await
+    }
+
+    // ── audio readback (the WAV surface) ─────────────────────────────────────
+
+    #[tool(
+        description = "Render a Sound offline to a .wav, saved to a temp file; \
+        returns the path + byte count. An agent can't hear bytes — open the file \
+        or use wav_stats/waveform to reason about it. Omit `sample` for the root."
+    )]
+    async fn render_wav(
+        &self,
+        Parameters(p): Parameters<RenderWavParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let req = Request::RenderWav {
+            sample: parse_sample_opt(&p.sample)?,
+            sample_rate: p.sample_rate,
+        };
+        self.wav(req).await
+    }
+
+    #[tool(description = "Cheap numeric stats of a Sound's offline render: \
+        duration_secs, peak, rms, channels, sample_rate. Omit `sample` for the \
+        root.")]
+    async fn wav_stats(
+        &self,
+        Parameters(p): Parameters<SampleArg>,
+    ) -> Result<CallToolResult, McpError> {
+        self.query(EditorQuery::WavStats {
+            sample: parse_sample_opt(&p.sample)?,
+        })
+        .await
+    }
+
+    #[tool(
+        description = "A downsampled min/max envelope (`buckets` columns) of a \
+        Sound's render, so you can reason about the waveform shape in text. Omit \
+        `sample` for the root."
+    )]
+    async fn waveform(
+        &self,
+        Parameters(p): Parameters<WaveformParams>,
+    ) -> Result<CallToolResult, McpError> {
+        self.query(EditorQuery::Waveform {
+            sample: parse_sample_opt(&p.sample)?,
+            buckets: p.buckets,
+        })
+        .await
+    }
+
+    // ── transport ────────────────────────────────────────────────────────────
+
+    #[tool(description = "Start playback of the root Sound / arrangement.")]
+    async fn play(&self) -> Result<CallToolResult, McpError> {
+        match self.req(Request::Play).await? {
+            Response::Ok => Ok(text("ok")),
+            Response::Err(e) => Err(McpError::internal_error(e, None)),
+            other => Err(unexpected(other)),
+        }
+    }
+
+    #[tool(description = "Stop playback.")]
+    async fn stop(&self) -> Result<CallToolResult, McpError> {
+        match self.req(Request::Stop).await? {
+            Response::Ok => Ok(text("ok")),
+            Response::Err(e) => Err(McpError::internal_error(e, None)),
+            other => Err(unexpected(other)),
+        }
+    }
+
+    // ── ergonomic typed mutators (common cases) ──────────────────────────────
+
+    #[tool(
+        description = "Add a node of `kind` (a schema NodeKind JSON value) at \
+        world (x, y). The editor mints the id; read it back with get_snapshot."
+    )]
+    async fn add_node(
+        &self,
+        Parameters(p): Parameters<AddNodeParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let kind = serde_json::from_value(p.kind)
+            .map_err(|e| McpError::invalid_params(format!("bad node kind: {e}"), None))?;
+        self.dispatch(EditorCommand::AddNode {
+            kind,
+            x: p.x,
+            y: p.y,
+        })
+        .await
+    }
+
+    #[tool(description = "Remove a node and every wire touching it.")]
+    async fn remove_node(
+        &self,
+        Parameters(p): Parameters<NodeArg>,
+    ) -> Result<CallToolResult, McpError> {
+        self.dispatch(EditorCommand::RemoveNode {
+            id: parse_node(&p.node)?,
+        })
+        .await
+    }
+
+    #[tool(description = "Wire an output port to an input port.")]
+    async fn connect(
+        &self,
+        Parameters(p): Parameters<ConnectParams>,
+    ) -> Result<CallToolResult, McpError> {
+        self.dispatch(EditorCommand::Connect {
+            from: parse_node(&p.from)?,
+            from_output: p.from_output,
+            to: parse_node(&p.to)?,
+            to_input: p.to_input,
+        })
+        .await
+    }
+
+    #[tool(description = "Set a numeric setting on a node (the SetField command).")]
+    async fn set_field(
+        &self,
+        Parameters(p): Parameters<SetFieldParams>,
+    ) -> Result<CallToolResult, McpError> {
+        self.dispatch(EditorCommand::SetField {
+            id: parse_node(&p.node)?,
+            key: p.key,
+            value: FieldValue::Num(p.value),
+        })
+        .await
+    }
+
+    #[tool(
+        description = "Render a Sound (`sample`) offline and store it as that \
+        sample's bounce (so it can be dropped into an arrangement)."
+    )]
+    async fn bounce(
+        &self,
+        Parameters(p): Parameters<SampleReq>,
+    ) -> Result<CallToolResult, McpError> {
+        self.dispatch(EditorCommand::Bounce {
+            sample: parse_sample(&p.sample)?,
+        })
+        .await
+    }
+
+    #[tool(
+        description = "Mark a sample as the project root (the one that plays / \
+        exports)."
+    )]
+    async fn set_root(
+        &self,
+        Parameters(p): Parameters<SampleReq>,
+    ) -> Result<CallToolResult, McpError> {
+        self.dispatch(EditorCommand::SetRoot {
+            id: parse_sample(&p.sample)?,
+        })
+        .await
+    }
+
+    // ── generic escape hatches ───────────────────────────────────────────────
+
+    #[tool(description = "Dispatch a raw EditorCommand (escape hatch for any \
+        command without a dedicated tool). `command` is internally tagged by \
+        \"cmd\"/\"args\" — match get_snapshot's shapes.")]
+    async fn dispatch_command(
+        &self,
+        Parameters(p): Parameters<CommandJsonParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let cmd: EditorCommand = serde_json::from_value(p.command)
+            .map_err(|e| McpError::invalid_params(format!("bad command: {e}"), None))?;
+        self.dispatch(cmd).await
+    }
+
+    #[tool(description = "Dispatch a list of raw EditorCommands in order in one \
+        round-trip (applied sequentially). Cuts latency for multi-step edits.")]
+    async fn dispatch_batch(
+        &self,
+        Parameters(p): Parameters<BatchJsonParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let cmds: Vec<EditorCommand> = p
+            .commands
+            .into_iter()
+            .map(serde_json::from_value)
+            .collect::<Result<_, _>>()
+            .map_err(|e| McpError::invalid_params(format!("bad command in batch: {e}"), None))?;
+        match self.req(Request::DispatchBatch(cmds)).await? {
+            Response::Ok => Ok(text("ok")),
+            Response::Err(e) => Err(McpError::internal_error(e, None)),
+            other => Err(unexpected(other)),
+        }
+    }
+
+    #[tool(description = "Run a raw EditorQuery (escape hatch for any query \
+        without a dedicated tool). `query` is internally tagged by \
+        \"query\"/\"args\".")]
+    async fn run_query(
+        &self,
+        Parameters(p): Parameters<QueryJsonParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let q: EditorQuery = serde_json::from_value(p.query)
+            .map_err(|e| McpError::invalid_params(format!("bad query: {e}"), None))?;
+        self.query(q).await
+    }
+}
+
+// ──────────────────────────────── helpers ───────────────────────────────────
+
+impl EditorMcp {
+    async fn req(&self, r: Request) -> Result<Response, McpError> {
+        self.link
+            .request(&r)
+            .await
+            .map_err(|e| McpError::internal_error(e.to_string(), None))
+    }
+
+    async fn dispatch(&self, cmd: EditorCommand) -> Result<CallToolResult, McpError> {
+        match self.req(Request::Dispatch(cmd)).await? {
+            Response::Ok => Ok(text("ok")),
+            Response::Err(e) => Err(McpError::internal_error(e, None)),
+            other => Err(unexpected(other)),
+        }
+    }
+
+    async fn query(&self, q: EditorQuery) -> Result<CallToolResult, McpError> {
+        match self.req(Request::Query(q)).await? {
+            Response::Query(qr) => Ok(text(
+                serde_json::to_string_pretty(&*qr)
+                    .unwrap_or_else(|e| format!("{{\"error\":\"{e}\"}}")),
+            )),
+            Response::Err(e) => Err(McpError::internal_error(e, None)),
+            other => Err(unexpected(other)),
+        }
+    }
+
+    /// RenderWav → save the `.wav` to a temp file, return the path + a one-line
+    /// summary. (An agent can't hear bytes; the human/tooling opens the file.)
+    async fn wav(&self, r: Request) -> Result<CallToolResult, McpError> {
+        match self.req(r).await? {
+            Response::Wav(bytes) => {
+                let path = std::env::temp_dir().join("awsm-audio-mcp-last.wav");
+                std::fs::write(&path, &bytes)
+                    .map_err(|e| McpError::internal_error(format!("write wav: {e}"), None))?;
+                Ok(text(format!(
+                    "wrote {} bytes to {}",
+                    bytes.len(),
+                    path.display()
+                )))
+            }
+            Response::Err(e) => Err(McpError::internal_error(e, None)),
+            other => Err(unexpected(other)),
+        }
+    }
+}
+
+#[tool_handler]
+impl ServerHandler for EditorMcp {
+    fn get_info(&self) -> ServerInfo {
+        // `ServerInfo` is `#[non_exhaustive]` in rmcp 1.x — build from Default and
+        // set the public fields rather than a struct literal.
+        let mut info = ServerInfo::default();
+        info.capabilities = ServerCapabilities::builder().enable_tools().build();
+        info.instructions = Some(
+            "Drive the awsm-audio node-graph WebAudio editor. Call get_snapshot to \
+             discover node/sample ids, mutate with the graph/sequencer/arrangement \
+             tools (or dispatch_command / dispatch_batch for anything without a \
+             dedicated tool), bounce a Sound and call render_wav / wav_stats / \
+             waveform to inspect the result."
+                .to_string(),
+        );
+        info
+    }
+
+    // ── push channel: forward editor events as MCP logging notifications ─────
+    async fn on_initialized(&self, context: NotificationContext<RoleServer>) {
+        let mut rx = self.link.subscribe_events();
+        let peer = context.peer;
+        tokio::spawn(async move {
+            loop {
+                match rx.recv().await {
+                    Ok(ev) => {
+                        let level = match ev.level.as_deref() {
+                            Some("error") => LoggingLevel::Error,
+                            Some("warning") => LoggingLevel::Warning,
+                            _ => LoggingLevel::Info,
+                        };
+                        let param = LoggingMessageNotificationParam {
+                            level,
+                            logger: Some("awsm-audio-editor".to_string()),
+                            data: serde_json::to_value(&ev).unwrap_or(Value::Null),
+                        };
+                        // Stops the forwarder once this MCP session drops.
+                        if peer.notify_logging_message(param).await.is_err() {
+                            break;
+                        }
+                    }
+                    // Slow consumer dropped some events — keep going.
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                }
+            }
+        });
+    }
+}
+
+fn text(s: impl Into<String>) -> CallToolResult {
+    CallToolResult::success(vec![Content::text(s.into())])
+}
+
+fn parse_node(s: &str) -> Result<NodeId, McpError> {
+    s.parse::<NodeId>()
+        .map_err(|e| McpError::invalid_params(format!("invalid node id {s:?}: {e}"), None))
+}
+
+fn parse_sample(s: &str) -> Result<SampleId, McpError> {
+    s.parse::<SampleId>()
+        .map_err(|e| McpError::invalid_params(format!("invalid sample id {s:?}: {e}"), None))
+}
+
+fn parse_sample_opt(s: &Option<String>) -> Result<Option<SampleId>, McpError> {
+    s.as_deref().map(parse_sample).transpose()
+}
+
+fn unexpected(resp: Response) -> McpError {
+    McpError::internal_error(format!("unexpected response: {resp:?}"), None)
+}
