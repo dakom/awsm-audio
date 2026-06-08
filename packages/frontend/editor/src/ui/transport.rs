@@ -76,6 +76,9 @@ pub fn render() -> Dom {
             .child(IconBtn::new("help").title("How to use this editor")
                 .on_click(|| controller().open_help()).render())
         }))
+        .child(vdivider())
+        // MCP remote-control link (connect modal + reactive status).
+        .child(crate::ui::mcp_modal::button())
         // Spacer.
         .child(html!("div", { .style("flex", "1") }))
         // Transient status / error message (e.g. "wire an Output to play").

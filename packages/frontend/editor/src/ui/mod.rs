@@ -10,6 +10,7 @@ pub mod context_menu;
 pub mod examples_modal;
 pub mod help_modal;
 pub mod inspector;
+pub mod mcp_modal;
 pub mod modal;
 pub mod node;
 pub mod palette;
@@ -107,6 +108,7 @@ pub fn render() -> Dom {
         .child(modal::render())
         .child(examples_modal::render())
         .child(help_modal::render())
+        .child(mcp_modal::render())
         .child(piano_roll::render())
     })
 }

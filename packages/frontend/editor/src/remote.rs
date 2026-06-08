@@ -61,9 +61,8 @@ thread_local! {
     static SESSION: RefCell<Option<Session>> = const { RefCell::new(None) };
 }
 
-/// Reactive connection status (for the UI button). Consumed by the Phase 4
-/// top-bar MCP button + connect modal.
-#[allow(dead_code)]
+/// Reactive connection status (for the UI button). Consumed by the top-bar MCP
+/// button + connect modal.
 pub fn status() -> Mutable<RemoteStatus> {
     STATUS.with(|s| s.clone())
 }
@@ -120,8 +119,7 @@ pub fn connect(control_origin: String) {
 
 /// Disconnect the live link (closes the WebTransport session). No-op when not
 /// connected. The "MCP disconnected" message is emitted by the connect task once
-/// the accept loop unwinds. Consumed by the Phase 4 connect UI.
-#[allow(dead_code)]
+/// the accept loop unwinds. Consumed by the connect UI.
 pub fn disconnect() {
     SESSION.with(|s| {
         if let Some(session) = s.borrow().as_ref() {
