@@ -13,6 +13,7 @@ name = "awsm-audio-editor"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "awsm-audio-editor-protocol",
  "awsm-audio-player",
  "awsm-audio-schema",
  "base64",
@@ -29,6 +30,17 @@ dependencies = [
  "wasm-bindgen",
  "wasm-bindgen-futures",
  "web-sys",
+]
+
+[[package]]
+name = "awsm-audio-editor-protocol"
+version = "0.1.0"
+dependencies = [
+ "awsm-audio-schema",
+ "serde",
+ "serde_json",
+ "toml",
+ "uuid",
 ]
 
 [[package]]

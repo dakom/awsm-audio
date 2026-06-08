@@ -11,7 +11,7 @@ repository.workspace = true
 [dependencies]
 serde = { workspace = true, features = ["derive"] }
 thiserror = { workspace = true }
-uuid = { version = "1.11.0", features = ["v4", "serde", "js"] }
+uuid = { workspace = true }
 # Encodes the bundled example WASM module inline in the `crush` example.
 base64 = { workspace = true }
 # Standard MIDI File parsing for the Note Sequencer (and Control Sequencer CC import).

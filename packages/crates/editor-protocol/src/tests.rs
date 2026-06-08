@@ -1,0 +1,221 @@
+//! Serde round-trip / wire-shape tests — the unattended coverage that the wire
+//! shapes are stable and that the reply types (`QueryResult`, `Response`) decode
+//! as well as encode. Values that don't derive `PartialEq` are compared by their
+//! serialized JSON form (serialize → deserialize → serialize, assert equal).
+
+use awsm_audio_schema::{Clip, NodeId, NodeKind, NoteEvent, SampleId};
+use serde_json::Value;
+
+use crate::{
+    ArrangeOp, Clipboard, EditorCommand, EditorQuery, FieldValue, QueryResult, Request, Response,
+    SampleInfo, SongOp, TransportInfo, WavStats, WaveformEnvelope,
+};
+
+/// JSON round-trip: encode → decode → re-encode and assert the two JSON values
+/// match. Proves both directions of the wire codec without needing `PartialEq`.
+fn json_round_trip<T>(value: &T)
+where
+    T: serde::Serialize + serde::de::DeserializeOwned,
+{
+    let first = serde_json::to_value(value).expect("encode");
+    let decoded: T = serde_json::from_value(first.clone()).expect("decode");
+    let second = serde_json::to_value(&decoded).expect("re-encode");
+    assert_eq!(first, second, "json round-trip mismatch");
+}
+
+/// TOML round-trip: encode → decode → re-encode-as-JSON and compare. The
+/// editor's `editor_dispatch_toml` seam depends on the TOML form being stable.
+fn toml_round_trip<T>(value: &T)
+where
+    T: serde::Serialize + serde::de::DeserializeOwned,
+{
+    let toml_str = toml::to_string(value).expect("encode toml");
+    let decoded: T = toml::from_str(&toml_str).expect("decode toml");
+    let a = serde_json::to_value(value).expect("json a");
+    let b = serde_json::to_value(&decoded).expect("json b");
+    assert_eq!(a, b, "toml round-trip mismatch:\n{toml_str}");
+}
+
+fn sample_commands() -> Vec<EditorCommand> {
+    let n = NodeId::new();
+    vec![
+        EditorCommand::AddNode {
+            kind: NodeKind::Gain(Default::default()),
+            x: 10.0,
+            y: 20.0,
+        },
+        EditorCommand::Connect {
+            from: n,
+            from_output: 0,
+            to: NodeId::new(),
+            to_input: 1,
+        },
+        EditorCommand::SetField {
+            id: n,
+            key: "gain".into(),
+            value: FieldValue::Num(0.5),
+        },
+        EditorCommand::EditSong {
+            node: n,
+            op: SongOp::AddNote {
+                track: 0,
+                event: NoteEvent {
+                    start: 0.0,
+                    length: 1.0,
+                    note: 60,
+                    velocity: 100,
+                },
+            },
+        },
+        EditorCommand::EditArrange {
+            op: ArrangeOp::AddClip {
+                track: 0,
+                start: 0.0,
+                source: SampleId::new(),
+                length: Some(2.5),
+            },
+        },
+        EditorCommand::Paste {
+            clip: Clipboard::default(),
+        },
+    ]
+}
+
+#[test]
+fn editor_command_json_and_toml_round_trip() {
+    for cmd in sample_commands() {
+        json_round_trip(&cmd);
+        // TOML is the seam `editor_dispatch_toml` uses; a bare enum variant must
+        // round-trip through it too.
+        toml_round_trip(&cmd);
+    }
+}
+
+#[test]
+fn editor_query_round_trip() {
+    let queries = [
+        EditorQuery::Snapshot,
+        EditorQuery::Samples,
+        EditorQuery::BounceStatus {
+            sample: SampleId::new(),
+        },
+        EditorQuery::Transport,
+        EditorQuery::WavStats { sample: None },
+        EditorQuery::Waveform {
+            sample: Some(SampleId::new()),
+            buckets: 256,
+        },
+    ];
+    for q in &queries {
+        json_round_trip(q);
+        toml_round_trip(q);
+    }
+}
+
+#[test]
+fn query_result_round_trip() {
+    let results = vec![
+        QueryResult::Samples(vec![SampleInfo {
+            id: SampleId::new(),
+            name: "main".into(),
+            kind: awsm_audio_schema::SampleKind::Sound,
+            is_root: true,
+            is_active: true,
+        }]),
+        QueryResult::BounceStatus("clean".into()),
+        QueryResult::Transport(TransportInfo {
+            playing: true,
+            peak: 0.5,
+            playhead: 1.25,
+            audio_state: "running".into(),
+        }),
+        QueryResult::WavStats(WavStats {
+            duration_secs: 2.0,
+            peak: 0.9,
+            rms: 0.6,
+            channels: 2,
+            sample_rate: 48_000,
+        }),
+        QueryResult::Waveform(WaveformEnvelope {
+            sample_rate: 48_000,
+            duration_secs: 2.0,
+            min: vec![-1.0, -0.5],
+            max: vec![1.0, 0.5],
+        }),
+    ];
+    for r in &results {
+        json_round_trip(r);
+    }
+}
+
+#[test]
+fn request_round_trip() {
+    let requests = vec![
+        Request::Dispatch(EditorCommand::ClearSelection),
+        Request::DispatchBatch(sample_commands()),
+        Request::Query(EditorQuery::Snapshot),
+        Request::Play,
+        Request::Stop,
+        Request::RenderWav {
+            sample: Some(SampleId::new()),
+            sample_rate: Some(44_100.0),
+        },
+        Request::RenderWav {
+            sample: None,
+            sample_rate: None,
+        },
+        Request::AttachWasm {
+            node: NodeId::new(),
+            wasm_base64: "AGFzbQEAAAA=".into(),
+            label: "gain".into(),
+        },
+    ];
+    for r in &requests {
+        json_round_trip(r);
+    }
+}
+
+#[test]
+fn response_round_trip() {
+    let responses = vec![
+        Response::Ok,
+        Response::Err("boom".into()),
+        Response::Wav(vec![0x52, 0x49, 0x46, 0x46]),
+        Response::Query(Box::new(QueryResult::BounceStatus("dirty".into()))),
+    ];
+    for r in &responses {
+        json_round_trip(r);
+    }
+}
+
+/// Pin the externally-tagged `Request` JSON shape the morning-checklist `/debug`
+/// payloads rely on.
+#[test]
+fn request_wire_shape() {
+    let v = serde_json::to_value(Request::Play).unwrap();
+    assert_eq!(v, Value::String("Play".into()));
+
+    let v = serde_json::to_value(Request::RenderWav {
+        sample: None,
+        sample_rate: None,
+    })
+    .unwrap();
+    // `RenderWav` with both fields skipped serializes to an empty object.
+    assert_eq!(v, serde_json::json!({ "RenderWav": {} }));
+
+    // The inner `EditorQuery` is adjacently tagged by "query"/"args".
+    let v = serde_json::to_value(Request::Query(EditorQuery::Samples)).unwrap();
+    assert_eq!(v, serde_json::json!({ "Query": { "query": "samples" } }));
+}
+
+/// `Clip` is reachable through `ArrangeOp::PasteClip`; make sure it round-trips.
+#[test]
+fn arrange_paste_clip_round_trip() {
+    let cmd = EditorCommand::EditArrange {
+        op: ArrangeOp::PasteClip {
+            track: 1,
+            clip: Clip::default(),
+        },
+    };
+    json_round_trip(&cmd);
+}

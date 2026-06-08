@@ -11,6 +11,7 @@ rust-version.workspace = true
 [dependencies]
 awsm-audio-player = { workspace = true }
 awsm-audio-schema = { workspace = true }
+awsm-audio-editor-protocol = { workspace = true }
 
 anyhow = { workspace = true }
 thiserror = { workspace = true }

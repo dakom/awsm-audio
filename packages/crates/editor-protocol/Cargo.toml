@@ -1,0 +1,18 @@
+[package]
+name = "awsm-audio-editor-protocol"
+description = "Shared serializable command/query/transport vocabulary for driving the awsm-audio editor over MCP/WebTransport."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+
+[dependencies]
+awsm-audio-schema = { workspace = true }
+serde = { workspace = true }
+uuid = { workspace = true } # ConnId = Uuid
+
+[dev-dependencies]
+serde_json = { workspace = true }
+toml = { workspace = true }

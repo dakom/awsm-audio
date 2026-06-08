@@ -15,6 +15,8 @@ mod node;
 pub mod snapshot;
 
 pub use command::{ArrangeOp, ControlOp, EditorCommand, EditorQuery, QueryResult, SongOp};
+// `Clipboard` (the serializable `Paste` payload) now lives in the protocol crate.
+pub use awsm_audio_editor_protocol::Clipboard;
 pub use node::{
     BoundaryPort, ConnId, ConnSink, DragState, EditorConnection, EditorNode, EnvDrag, PendingWire,
 };
@@ -250,15 +252,6 @@ pub enum PaletteDrag {
     Inlet,
     Outlet,
     SampleRef,
-}
-
-/// A copy/paste payload (also the `Paste` command's argument, so a paste is an
-/// MCP-drivable command): nodes (kind + label + relative position) and the wires
-/// among them (endpoints are indices into `nodes`).
-#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
-pub struct Clipboard {
-    pub nodes: Vec<(awsm_audio_schema::NodeKind, String, f64, f64)>,
-    pub wires: Vec<(usize, u32, usize, ConnSink)>,
 }
 
 impl EditorController {
@@ -1342,6 +1335,12 @@ impl EditorController {
                 playhead: self.playhead.get(),
                 audio_state: self.audio_state(),
             }),
+            // The WAV-readback queries need an async offline render, so the remote
+            // transport routes them to a dedicated async path (see `remote.rs`);
+            // they never reach this synchronous interpreter.
+            EditorQuery::WavStats { .. } | EditorQuery::Waveform { .. } => {
+                unreachable!("WavStats/Waveform are answered on the async render path")
+            }
         }
     }
 
