@@ -1925,6 +1925,40 @@ impl EditorController {
         }
     }
 
+    /// Set the loop/export **in** marker to the current playhead (keeps the out).
+    pub fn arrange_set_loop_in(&self) {
+        let start = self.arrange_start_secs();
+        let end = self.active_arrangement().and_then(|a| a.loop_end);
+        self.dispatch(EditorCommand::EditArrange {
+            op: ArrangeOp::SetMarkers {
+                start: Some(start),
+                end,
+            },
+        });
+    }
+
+    /// Set the loop/export **out** marker to the current playhead (keeps the in).
+    pub fn arrange_set_loop_out(&self) {
+        let end = self.arrange_start_secs();
+        let start = self.active_arrangement().and_then(|a| a.loop_start);
+        self.dispatch(EditorCommand::EditArrange {
+            op: ArrangeOp::SetMarkers {
+                start,
+                end: Some(end),
+            },
+        });
+    }
+
+    /// Clear the loop/export markers (loop + export span the whole timeline).
+    pub fn arrange_clear_loop(&self) {
+        self.dispatch(EditorCommand::EditArrange {
+            op: ArrangeOp::SetMarkers {
+                start: None,
+                end: None,
+            },
+        });
+    }
+
     /// The live arrangement playhead in seconds (scrub start + elapsed), or `None`
     /// when not performing an arrangement. Driven each frame by the waveform loop.
     pub fn arrangement_playhead_secs(&self) -> Option<f64> {
