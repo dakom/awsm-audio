@@ -1335,6 +1335,51 @@ impl EditorController {
                 playhead: self.playhead.get(),
                 audio_state: self.audio_state(),
             }),
+            // Discovery: the creatable-node catalog (default value + field keys
+            // per kind) so an MCP agent can build a graph with zero schema
+            // knowledge.
+            EditorQuery::Catalog => {
+                use command::NodeKindInfo;
+                let mut out = Vec::new();
+                for section in crate::catalog::sections() {
+                    let section_name = section.name.to_string();
+                    for kind in section.kinds {
+                        let tag = serde_json::to_value(&kind)
+                            .ok()
+                            .and_then(|v| {
+                                v.get("kind").and_then(|k| k.as_str()).map(str::to_string)
+                            })
+                            .unwrap_or_default();
+                        let label = crate::ports::kind_label(&kind).to_string();
+                        let fields = crate::fields::fields(&kind)
+                            .iter()
+                            .map(field_info)
+                            .collect();
+                        out.push(NodeKindInfo {
+                            kind: tag,
+                            label,
+                            section: section_name.clone(),
+                            example: kind,
+                            fields,
+                        });
+                    }
+                }
+                QueryResult::Catalog(out)
+            }
+            // Discovery: the editable fields of one live node (covers worklet
+            // nodes whose params are discovered at runtime).
+            EditorQuery::NodeFields { node } => {
+                let lock = self.nodes.lock_ref();
+                let fields = lock
+                    .iter()
+                    .find(|n| n.id == node)
+                    .map(|n| {
+                        let k = n.kind.borrow();
+                        crate::fields::fields(&k).iter().map(field_info).collect()
+                    })
+                    .unwrap_or_default();
+                QueryResult::NodeFields(fields)
+            }
             // The WAV-readback queries need an async offline render, so the remote
             // transport routes them to a dedicated async path (see `remote.rs`);
             // they never reach this synchronous interpreter.
@@ -4976,6 +5021,38 @@ fn call_f64(exports: &js_sys::Object, name: &str, arg: Option<f64>) -> Option<f6
 /// Fetch a URL into an `ArrayBuffer` (for URL-sourced buffer / wasm assets).
 /// A filesystem-safe download name for a Sound (`"Wobble Bass"` → `"Wobble-Bass"`),
 /// falling back to `"sound"` when nothing usable remains.
+/// Project an editor [`fields::Field`](crate::fields::Field) into the
+/// serializable [`FieldInfo`](command::FieldInfo) the MCP discovery queries
+/// (`Catalog` / `NodeFields`) return — so an agent learns a node's `set_field`
+/// keys, control type, and current value without knowing the schema.
+fn field_info(f: &crate::fields::Field) -> command::FieldInfo {
+    use crate::fields::Control;
+    let (control, value_num, value_text, options) = match &f.control {
+        Control::Number(n) => ("number".to_string(), Some(*n), None, Vec::new()),
+        Control::Choice { value, options } => (
+            "choice".to_string(),
+            None,
+            Some(value.clone()),
+            options.iter().map(|s| s.to_string()).collect(),
+        ),
+        Control::Bool(b) => (
+            "bool".to_string(),
+            Some(if *b { 1.0 } else { 0.0 }),
+            None,
+            Vec::new(),
+        ),
+    };
+    command::FieldInfo {
+        key: f.key.to_string(),
+        label: f.label.to_string(),
+        control,
+        value_num,
+        value_text,
+        options,
+        modulatable: f.modulation.is_some(),
+    }
+}
+
 fn sanitize_filename(name: &str) -> String {
     let s: String = name
         .trim()

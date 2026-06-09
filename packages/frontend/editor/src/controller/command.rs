@@ -10,6 +10,6 @@
 //! [`super`] (`dispatch`/`query`) and [`super::snapshot`].
 
 pub use awsm_audio_editor_protocol::{
-    ArrangeOp, AssetInfo, ControlOp, EditorCommand, EditorQuery, PlacedClip, QueryResult,
-    SampleInfo, SongOp, TransportInfo,
+    ArrangeOp, AssetInfo, ControlOp, EditorCommand, EditorQuery, FieldInfo, NodeKindInfo,
+    PlacedClip, QueryResult, SampleInfo, SongOp, TransportInfo,
 };

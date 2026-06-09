@@ -7,8 +7,8 @@ use awsm_audio_schema::{Clip, NodeId, NodeKind, NoteEvent, SampleId};
 use serde_json::Value;
 
 use crate::{
-    ArrangeOp, Clipboard, EditorCommand, EditorQuery, FieldValue, QueryResult, Request, Response,
-    SampleInfo, SongOp, TransportInfo, WavStats, WaveformEnvelope,
+    ArrangeOp, Clipboard, EditorCommand, EditorQuery, FieldInfo, FieldValue, NodeKindInfo,
+    QueryResult, Request, Response, SampleInfo, SongOp, TransportInfo, WavStats, WaveformEnvelope,
 };
 
 /// JSON round-trip: encode → decode → re-encode and assert the two JSON values
@@ -146,6 +146,43 @@ fn query_result_round_trip() {
     for r in &results {
         json_round_trip(r);
     }
+}
+
+#[test]
+fn catalog_and_node_fields_round_trip() {
+    let catalog = QueryResult::Catalog(vec![NodeKindInfo {
+        kind: "oscillator".into(),
+        label: "Oscillator".into(),
+        section: "Sources".into(),
+        example: NodeKind::Gain(Default::default()),
+        fields: vec![
+            FieldInfo {
+                key: "type".into(),
+                label: "type".into(),
+                control: "choice".into(),
+                value_num: None,
+                value_text: Some("sine".into()),
+                options: vec!["sine".into(), "square".into()],
+                modulatable: false,
+            },
+            FieldInfo {
+                key: "frequency".into(),
+                label: "freq (Hz)".into(),
+                control: "number".into(),
+                value_num: Some(440.0),
+                value_text: None,
+                options: vec![],
+                modulatable: true,
+            },
+        ],
+    }]);
+    json_round_trip(&catalog);
+
+    let q = EditorQuery::NodeFields {
+        node: NodeId::new(),
+    };
+    json_round_trip(&q);
+    toml_round_trip(&q);
 }
 
 #[test]

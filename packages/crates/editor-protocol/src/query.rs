@@ -5,7 +5,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use awsm_audio_schema::{Arrangement, SampleId, SampleKind};
+use awsm_audio_schema::{Arrangement, NodeId, NodeKind, SampleId, SampleKind};
 
 use crate::snapshot::{EditorProject, EditorSnapshot};
 
@@ -40,6 +40,14 @@ pub enum EditorQuery {
         sample: Option<SampleId>,
         buckets: u32,
     },
+    /// The palette catalog: every creatable node kind with a ready-to-use default
+    /// value and its editable field keys — so `add_node` / `set_field` need no
+    /// schema knowledge. This is the discovery entry point for graph building.
+    Catalog,
+    /// The editable fields of one live node (key, control, current value, range,
+    /// whether it's modulation-targetable). Covers worklet nodes whose params are
+    /// discovered at runtime, so `set_field` keys are always discoverable.
+    NodeFields { node: NodeId },
 }
 
 /// The answer to an [`EditorQuery`]. Serialized back to the caller; also
@@ -56,6 +64,51 @@ pub enum QueryResult {
     Transport(TransportInfo),
     WavStats(WavStats),
     Waveform(WaveformEnvelope),
+    Catalog(Vec<NodeKindInfo>),
+    NodeFields(Vec<FieldInfo>),
+}
+
+/// One editable setting of a node — the keys/ranges `set_field` accepts. Mirrors
+/// the editor's `fields` reflection so an agent can edit a node without knowing
+/// its schema.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FieldInfo {
+    /// The `set_field` key.
+    pub key: String,
+    /// Human label shown in the inspector.
+    pub label: String,
+    /// `"number"` | `"choice"` | `"bool"`.
+    pub control: String,
+    /// Current value for number/bool controls (bool is `0.0`/`1.0`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value_num: Option<f64>,
+    /// Current value for a `"choice"` control.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value_text: Option<String>,
+    /// Allowed values for a `"choice"` control.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub options: Vec<String>,
+    /// True if a signal can be wired to this field (a modulation inlet).
+    pub modulatable: bool,
+}
+
+/// A creatable node kind, surfaced for discovery so an agent can `add_node`
+/// without knowing the schema. Pass `kind` (the tag string) or `example` (the
+/// full default value) to `add_node`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NodeKindInfo {
+    /// The serde tag — e.g. `"oscillator"`, `"biquad_filter"`. Pass this string to
+    /// `add_node`, or copy `example` verbatim.
+    pub kind: String,
+    /// Human label (e.g. `"Oscillator"`).
+    pub label: String,
+    /// Palette section (`"Sources"`, `"Effects"`, `"Sequencing"`, …).
+    pub section: String,
+    /// A ready-to-use default value — the exact JSON `add_node`'s `kind` accepts,
+    /// e.g. `{"kind":"oscillator","props":{…}}`.
+    pub example: NodeKind,
+    /// Editable field keys (`set_field` targets) with control type + current value.
+    pub fields: Vec<FieldInfo>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

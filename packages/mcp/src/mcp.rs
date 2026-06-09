@@ -26,7 +26,9 @@ use rmcp::{
 use serde_json::Value;
 
 use awsm_audio_editor_protocol::schema::{NodeId, SampleId};
-use awsm_audio_editor_protocol::{EditorCommand, EditorQuery, FieldValue, Request, Response};
+use awsm_audio_editor_protocol::{
+    EditorCommand, EditorQuery, FieldValue, QueryResult, Request, Response,
+};
 
 use crate::link::EditorLink;
 
@@ -83,9 +85,11 @@ pub struct WaveformParams {
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct AddNodeParams {
-    /// A schema `NodeKind` value as JSON (the same shape `get_snapshot` returns
-    /// in `graph.nodes[].kind`, e.g. `{"gain":{"gain":1.0}}`). The editor mints
-    /// the node id — read it back from a follow-up `get_snapshot`.
+    /// The node kind. Easiest: a kind-name string from `list_node_kinds` (e.g.
+    /// `"oscillator"`, `"biquad_filter"`, `"gain"`) — the editor fills in WebAudio
+    /// defaults. Or a full value: `{"kind":"<tag>","props":{…}}` (copy a kind's
+    /// `example` from `list_node_kinds`). The editor mints the node id — read it
+    /// back from a follow-up `get_snapshot`.
     pub kind: Value,
     pub x: f64,
     pub y: f64,
@@ -170,6 +174,30 @@ impl EditorMcp {
     )]
     async fn get_snapshot(&self) -> Result<CallToolResult, McpError> {
         self.query(EditorQuery::Snapshot).await
+    }
+
+    #[tool(
+        description = "List every creatable node kind with a ready-to-use default \
+        value (`example`) and its editable field keys (`fields`) — so you can \
+        add_node + set_field with no schema guessing. Call this before building a \
+        graph."
+    )]
+    async fn list_node_kinds(&self) -> Result<CallToolResult, McpError> {
+        self.query(EditorQuery::Catalog).await
+    }
+
+    #[tool(description = "The editable fields of one live node: each `key` (for \
+        set_field), control type, current value, choice options, and whether it's \
+        modulation-targetable. Use this to discover a node's set_field keys \
+        (including a worklet's discovered params).")]
+    async fn get_node_fields(
+        &self,
+        Parameters(p): Parameters<NodeArg>,
+    ) -> Result<CallToolResult, McpError> {
+        self.query(EditorQuery::NodeFields {
+            node: parse_node(&p.node)?,
+        })
+        .await
     }
 
     #[tool(description = "List every sample (id, name, kind, root/active flags).")]
@@ -278,14 +306,17 @@ impl EditorMcp {
     // ── ergonomic typed mutators (common cases) ──────────────────────────────
 
     #[tool(
-        description = "Add a node of `kind` (a schema NodeKind JSON value) at \
-        world (x, y). The editor mints the id; read it back with get_snapshot."
+        description = "Add a node at world (x, y). `kind` is a kind-name string \
+        from list_node_kinds (defaults filled in) or a full \
+        {\"kind\":…,\"props\":…} value. The editor mints the id; read it back with \
+        get_snapshot."
     )]
     async fn add_node(
         &self,
         Parameters(p): Parameters<AddNodeParams>,
     ) -> Result<CallToolResult, McpError> {
-        let kind = serde_json::from_value(p.kind)
+        let kind_value = self.resolve_kind(p.kind).await?;
+        let kind = serde_json::from_value(kind_value)
             .map_err(|e| McpError::invalid_params(format!("bad node kind: {e}"), None))?;
         self.dispatch(EditorCommand::AddNode {
             kind,
@@ -470,6 +501,35 @@ impl EditorMcp {
         }
     }
 
+    /// Resolve an `add_node` `kind` argument: a bare kind-name string is looked up
+    /// in the catalog and replaced by its default value; an object is used as-is.
+    async fn resolve_kind(&self, kind: Value) -> Result<Value, McpError> {
+        let Some(tag) = kind.as_str() else {
+            return Ok(kind); // already a full {"kind":…,"props":…} value
+        };
+        let catalog = match self.req(Request::Query(EditorQuery::Catalog)).await? {
+            Response::Query(qr) => match *qr {
+                QueryResult::Catalog(v) => v,
+                other => {
+                    return Err(McpError::internal_error(
+                        format!("unexpected catalog result: {other:?}"),
+                        None,
+                    ));
+                }
+            },
+            Response::Err(e) => return Err(McpError::internal_error(e, None)),
+            other => return Err(unexpected(other)),
+        };
+        let info = catalog.into_iter().find(|i| i.kind == tag).ok_or_else(|| {
+            McpError::invalid_params(
+                format!("unknown node kind {tag:?}; call list_node_kinds for valid kinds"),
+                None,
+            )
+        })?;
+        serde_json::to_value(&info.example)
+            .map_err(|e| McpError::internal_error(e.to_string(), None))
+    }
+
     async fn query(&self, q: EditorQuery) -> Result<CallToolResult, McpError> {
         match self.req(Request::Query(q)).await? {
             Response::Query(qr) => Ok(text(
@@ -562,14 +622,27 @@ impl ServerHandler for EditorMcp {
         _req: Option<PaginatedRequestParams>,
         _ctx: RequestContext<RoleServer>,
     ) -> Result<ListResourcesResult, McpError> {
-        let mut r = RawResource::new("awsm://docs/worklet-abi", "Worklet ABI");
-        r.description = Some(
-            "How to author a WASM DSP worklet against awsm-audio-worklet, build it, \
-             and attach it with attach_wasm — with a minimal Gain example."
-                .to_string(),
-        );
-        r.mime_type = Some("text/markdown".to_string());
-        Ok(ListResourcesResult::with_all_items(vec![r.no_annotation()]))
+        let res = |uri: &str, name: &str, desc: &str| {
+            let mut r = RawResource::new(uri, name);
+            r.description = Some(desc.to_string());
+            r.mime_type = Some("text/markdown".to_string());
+            r.no_annotation()
+        };
+        Ok(ListResourcesResult::with_all_items(vec![
+            res(
+                "awsm://docs/vocabulary",
+                "Command/query vocabulary",
+                "The JSON shapes for dispatch_command / run_query (node kinds, \
+                 set_field, the sequencer + arrangement ops) — read this before \
+                 using the escape hatches.",
+            ),
+            res(
+                "awsm://docs/worklet-abi",
+                "Worklet ABI",
+                "How to author a WASM DSP worklet against awsm-audio-worklet, build \
+                 it, and attach it with attach_wasm — with a minimal Gain example.",
+            ),
+        ]))
     }
 
     async fn read_resource(
@@ -578,6 +651,7 @@ impl ServerHandler for EditorMcp {
         _ctx: RequestContext<RoleServer>,
     ) -> Result<ReadResourceResult, McpError> {
         let body = match req.uri.as_str() {
+            "awsm://docs/vocabulary" => VOCABULARY_DOC,
             "awsm://docs/worklet-abi" => WORKLET_ABI_DOC,
             other => {
                 return Err(McpError::resource_not_found(
@@ -622,6 +696,89 @@ impl ServerHandler for EditorMcp {
         }
     }
 }
+
+/// The command/query JSON-shape reference served as `awsm://docs/vocabulary`. It
+/// pins the serde tagging the escape hatches (`dispatch_command` / `run_query`)
+/// expect, so an agent isn't guessing at `cmd`/`args`/`op` nesting.
+const VOCABULARY_DOC: &str = r#"# awsm-audio command/query vocabulary
+
+Most graph building is covered by the typed tools (add_node, connect, set_field,
+bounce, render_wav, …). For anything without a dedicated tool, use the escape
+hatches `dispatch_command` (an EditorCommand) and `run_query` (an EditorQuery).
+Their JSON is serde-tagged — the shapes below are exact.
+
+## Discover first
+
+- `list_node_kinds` → every creatable node kind with a default `example` value
+  (the exact `add_node` `kind`) and its editable field `key`s.
+- `get_node_fields { node }` → one live node's set_field keys + current values
+  (covers worklet params discovered at runtime).
+- `get_snapshot` → ids of existing nodes/connections + the active arrangement.
+
+## Node kinds (for add_node)
+
+`add_node` accepts either a kind-name string (defaults filled in):
+
+    { "kind": "oscillator", "x": 0, "y": 0 }
+
+or a full value (copy a kind's `example` from list_node_kinds):
+
+    { "kind": {"kind":"biquad_filter","props":{"type":"lowpass",
+      "frequency":{"value":1000.0},"q":{"value":1.0},"gain":{"value":0.0},
+      "detune":{"value":0.0}}}, "x": 0, "y": 0 }
+
+A NodeKind value is adjacently tagged: `{"kind":"<tag>","props":{…}}`.
+
+## EditorCommand (dispatch_command)
+
+Adjacently tagged by `cmd`/`args`. Examples:
+
+    {"cmd":"set_field","args":{"id":"<node>","key":"frequency","value":{"t":"num","v":880.0}}}
+    {"cmd":"connect","args":{"from":"<a>","from_output":0,"to":"<b>","to_input":0}}
+    {"cmd":"add_sample","args":{"kind":"arrangement"}}   // kind: "sound" | "arrangement"
+
+`set_field`'s `value` is a FieldValue: `{"t":"num","v":1.0}`, `{"t":"text","v":"x"}`,
+or `{"t":"bool","v":true}`. (The set_field *tool* takes a plain number; use this
+form only via dispatch_command for text/bool fields.)
+
+### Sequencer + arrangement sub-ops
+
+These wrap a nested op, itself adjacently tagged by `op`/`args`:
+
+    // Note Sequencer (node-addressed):
+    {"cmd":"edit_song","args":{"node":"<seq>","op":{"op":"add_track"}}}
+    {"cmd":"edit_song","args":{"node":"<seq>","op":{"op":"add_note","args":{
+       "track":0,"event":{"start":0.0,"length":1.0,"note":60,"velocity":100}}}}}
+    {"cmd":"edit_song","args":{"node":"<seq>","op":{"op":"set_bpm","args":120.0}}}
+
+    // Control Sequencer (node-addressed): edit_control, ops add_lane / add_point / …
+    {"cmd":"edit_control","args":{"node":"<seq>","op":{"op":"add_lane"}}}
+
+    // Arrangement (no node — edits the active Arrangement sample):
+    {"cmd":"edit_arrange","args":{"op":{"op":"add_track"}}}
+    {"cmd":"edit_arrange","args":{"op":{"op":"add_clip","args":{
+       "track":0,"start":0.0,"source":"<bounced-sample-id>"}}}}
+
+Tuple-variant ops take a bare value as `args` (e.g. `set_bpm` → `"args":120.0`).
+
+## EditorQuery (run_query)
+
+Adjacently tagged by `query`/`args`. Unit variants need no args:
+
+    {"query":"snapshot"}
+    {"query":"samples"}
+    {"query":"bounce_status","args":{"sample":"<id>"}}
+    {"query":"waveform","args":{"sample":null,"buckets":64}}
+
+## Typical flow
+
+1. list_node_kinds → pick kinds.
+2. add_node (source) + add_node (effects); connect them; the last unconnected
+   output auditions to master.
+3. set_field to shape it; render_wav / wav_stats / waveform to inspect.
+4. bounce a Sound, then build an Arrangement (add_sample arrangement →
+   edit_arrange add_track / add_clip).
+"#;
 
 /// The worklet-authoring guide served both as the `awsm://docs/worklet-abi`
 /// resource and the `author_worklet` prompt, so an agent can write a correct
