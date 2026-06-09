@@ -15,40 +15,49 @@ use std::net::{Ipv6Addr, SocketAddr};
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
+use clap::Parser;
 
 use crate::cert::GeneratedCert;
 use crate::link::EditorLink;
 
-/// Parsed CLI arguments: the two listen ports.
-struct Args {
-    http_port: u16,
-    quic_port: u16,
-}
+const DEFAULT_CLIENT_PORT: u16 = 9171;
+const DEFAULT_BROWSER_PORT: u16 = 9172;
 
-/// Minimal `--http-port <n> --quic-port <n>` parser (defaults 9171 / 9172).
-fn parse_args() -> Args {
-    let mut http_port = 9171;
-    let mut quic_port = 9172;
-    let mut it = std::env::args().skip(1);
-    while let Some(arg) = it.next() {
-        match arg.as_str() {
-            "--http-port" => {
-                if let Some(v) = it.next().and_then(|s| s.parse().ok()) {
-                    http_port = v;
-                }
-            }
-            "--quic-port" => {
-                if let Some(v) = it.next().and_then(|s| s.parse().ok()) {
-                    quic_port = v;
-                }
-            }
-            _ => {}
-        }
-    }
-    Args {
-        http_port,
-        quic_port,
-    }
+/// CLI arguments: the two listen ports.
+///
+/// The server runs two listeners for two different peers:
+///
+///   --client-port  (HTTP, TCP)  the MCP client / agent connects here: the rmcp
+///                               `/mcp` endpoint, plus `/control` + `/debug`. This
+///                               is also the `?mcp=http://127.0.0.1:<port>` origin
+///                               the editor points at to fetch the cert + dial info.
+///
+///   --browser-port (WebTransport / QUIC, UDP)  the in-browser editor dials *out*
+///                               to this for the live data link.
+#[derive(Debug, Parser)]
+#[command(
+    name = "awsm-audio-mcp",
+    version,
+    about = "Native MCP server for the awsm-audio editor.",
+    long_about = "Native MCP server for the awsm-audio editor — a stateless bridge \
+between an MCP client and the in-browser editor.\n\n\
+It runs two listeners for two different peers:\n\
+  - --client-port  (HTTP / TCP):  the MCP client / agent connects here (rmcp `/mcp`, \
+plus `/control` and `/debug`). This is also the `?mcp=http://127.0.0.1:<port>` origin \
+the editor points at.\n\
+  - --browser-port (WebTransport / QUIC, UDP):  the in-browser editor dials out to \
+this for the live data link."
+)]
+struct Args {
+    /// HTTP/TCP port for the MCP client + control surface (rmcp `/mcp`, `/control`,
+    /// `/debug`); the `?mcp=http://127.0.0.1:<port>` origin the editor points at.
+    #[arg(long, default_value_t = DEFAULT_CLIENT_PORT)]
+    client_port: u16,
+
+    /// WebTransport (QUIC / UDP) port the in-browser editor dials out to for the
+    /// live data link.
+    #[arg(long, default_value_t = DEFAULT_BROWSER_PORT)]
+    browser_port: u16,
 }
 
 #[tokio::main]
@@ -63,20 +72,27 @@ async fn main() -> Result<()> {
     // rustls needs a process-wide default crypto provider for quinn's TLS.
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 
-    let args = parse_args();
+    let args = Args::parse();
 
     let cert = Arc::new(GeneratedCert::new("localhost").context("generate dev cert")?);
     tracing::info!("dev cert hash (base64url): {}", cert.hash_base64url());
 
     let link = EditorLink::shared();
 
-    let quic_addr = SocketAddr::new(Ipv6Addr::UNSPECIFIED.into(), args.quic_port);
+    let quic_addr = SocketAddr::new(Ipv6Addr::UNSPECIFIED.into(), args.browser_port);
     let endpoint = quic::build_endpoint(&cert, quic_addr).context("build QUIC endpoint")?;
-    tracing::info!("WebTransport (QUIC) listening on udp/{}", args.quic_port);
+    tracing::info!(
+        "browser link: WebTransport (QUIC) listening on udp/{}",
+        args.browser_port
+    );
     tokio::spawn(quic::accept_loop(endpoint, link.clone()));
 
-    let http_addr = SocketAddr::from(([127, 0, 0, 1], args.http_port));
-    http::serve(http_addr, cert, args.quic_port, link)
+    let http_addr = SocketAddr::from(([127, 0, 0, 1], args.client_port));
+    tracing::info!(
+        "client link: HTTP control + rmcp /mcp on tcp/{}",
+        args.client_port
+    );
+    http::serve(http_addr, cert, args.browser_port, link)
         .await
         .context("control http server")?;
     Ok(())
