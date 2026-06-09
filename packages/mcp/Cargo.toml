@@ -22,6 +22,7 @@ awsm-audio-editor-protocol = { workspace = true, features = ["schemars"] }
 awsm-audio-schema = { workspace = true, features = ["schemars"] }
 
 tokio = { version = "1.47", features = ["full"] }
+clap = { version = "4", features = ["derive"] }
 anyhow = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
