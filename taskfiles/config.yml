@@ -10,6 +10,8 @@ vars:
   PATH_FRONTENDS: '{{joinPath .PATH_PACKAGES "frontend"}}'
   PATH_CRATE_PLAYER: '{{joinPath .PATH_CRATES "player"}}'
   PATH_FRONTEND_EDITOR: '{{joinPath .PATH_FRONTENDS "editor"}}'
+  PATH_CLOUDFLARE: '{{joinPath .PATH_REPO_ROOT "cloudflare"}}'
+  PATH_CLOUDFLARE_EDITOR: '{{joinPath .PATH_CLOUDFLARE "editor"}}'
 
   # Ports — deliberately in the 91xx block so they never collide with the
   # awsm-renderer dev servers (which live in 9079–9085).
@@ -23,11 +25,13 @@ vars:
   # The default MCP server origin the editor dials out to (always local).
   URL_MCP_DEFAULT: "http://127.0.0.1:{{.PORT_MCP_HTTP_DEV}}"
 
-  # URLs — production (GitHub Pages deploy targets)
-  URL_PROD_EDITOR: "https://dakom.github.io/awsm-audio/editor/"
+  # URLs — Cloudflare Pages deploy target (served at the project root)
+  URL_EDITOR: "/"
 
-  # Trunk public-URL prefix. Production builds embed
-  # `${PROD_ROOT_BASE_URI_PATH}/<frontend>/` so links resolve under the repo
-  # subpath of the dakom.github.io site; dev builds run at the root.
-  PROD_ROOT_BASE_URI_PATH: "/awsm-audio"
-  DEV_ROOT_BASE_URI_PATH: ""
+  # Cloudflare Pages bindings
+  CLOUDFLARE_PAGES_PROJECT: "awsm-audio"
+  CLOUDFLARE_PAGES_BRANCH: "main"
+
+  # Trunk root base URI path. The editor is served at the project root on
+  # Cloudflare Pages, so both dev and production builds run at the root.
+  ROOT_BASE_URI_PATH: ""
