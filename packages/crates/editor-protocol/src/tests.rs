@@ -193,6 +193,9 @@ fn request_round_trip() {
         Request::Query(EditorQuery::Snapshot),
         Request::Play,
         Request::Stop,
+        Request::SetActiveSample {
+            sample: SampleId::new(),
+        },
         Request::RenderWav {
             sample: Some(SampleId::new()),
             sample_rate: Some(44_100.0),

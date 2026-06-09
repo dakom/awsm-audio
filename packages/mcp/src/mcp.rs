@@ -392,6 +392,28 @@ impl EditorMcp {
         .await
     }
 
+    #[tool(
+        description = "Switch the active editing canvas to `sample`, so subsequent \
+        edits/queries (add_node, connect, get_snapshot, …) operate on its graph. \
+        Use this to author a sub-sample (e.g. an instrument Sound): switch to it, \
+        build its graph, then switch back to wire it up."
+    )]
+    async fn set_active_sample(
+        &self,
+        Parameters(p): Parameters<SampleReq>,
+    ) -> Result<CallToolResult, McpError> {
+        match self
+            .req(Request::SetActiveSample {
+                sample: parse_sample(&p.sample)?,
+            })
+            .await?
+        {
+            Response::Ok => Ok(text("ok")),
+            Response::Err(e) => Err(McpError::internal_error(e, None)),
+            other => Err(unexpected(other)),
+        }
+    }
+
     // ── worklet authoring ────────────────────────────────────────────────────
 
     #[tool(
@@ -778,6 +800,25 @@ Adjacently tagged by `query`/`args`. Unit variants need no args:
 3. set_field to shape it; render_wav / wav_stats / waveform to inspect.
 4. bounce a Sound, then build an Arrangement (add_sample arrangement →
    edit_arrange add_track / add_clip).
+
+## Multi-sample: an instrument played by a sequencer
+
+A Sound is a node graph; another Sound can reference it (a Sample-ref) and a Note
+Sequencer can trigger it per note. `set_active_sample` switches which sample's
+graph you're editing.
+
+1. Make an instrument Sound: `add_sample {kind:"sound"}` (it becomes active and
+   gets a fresh id — find it with list_samples), then add its voice
+   (e.g. add_node "oscillator"). When triggered, its sources play at the note's
+   pitch for the note's length.
+2. `set_active_sample` back to the song Sound (e.g. the root "main").
+3. There, `add_node "note_sequencer"`; author notes with
+   `edit_song add_track` / `add_note` (see above). Add a Sample-ref to the
+   instrument: `{"cmd":"add_sample_ref","args":{"sample":"<instrument-id>","x":0,"y":0}}`.
+4. Bind the sequencer's output to the ref's trigger:
+   `{"cmd":"bind","args":{"from":"<sequencer>","from_output":0,"to":"<sample-ref>"}}`
+   (`from_output` indexes the sequencer's `outputs`, one per melodic track / drum
+   note). The root Sound is now a "song" — render_wav plays the sequence.
 "#;
 
 /// The worklet-authoring guide served both as the `awsm://docs/worklet-abi`

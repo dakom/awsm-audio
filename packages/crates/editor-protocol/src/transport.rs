@@ -23,6 +23,14 @@ pub enum Request {
     /// Transport control (the `editor_play`/`editor_stop` seams).
     Play,
     Stop,
+    /// Navigation: make `sample` the active editing canvas, so subsequent
+    /// `Dispatch`/`Query` operate on its graph. Session state — like Play/Stop,
+    /// not a document command. Needed to author multi-sample projects
+    /// (instruments, sub-Sounds) over MCP: switch to a sub-sample, edit it, switch
+    /// back.
+    SetActiveSample {
+        sample: SampleId,
+    },
     /// Render a Sound offline to a `.wav` (raw bytes). `sample = None` renders
     /// the project root. Optional `sample_rate` overrides the bounce rate.
     RenderWav {

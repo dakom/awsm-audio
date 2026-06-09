@@ -290,6 +290,10 @@ fn dispatch(req: Request) -> Response {
             ctrl.stop();
             Response::Ok
         }
+        Request::SetActiveSample { sample } => {
+            ctrl.switch_sample(sample);
+            Response::Ok
+        }
         Request::RenderWav { .. } | Request::AttachWasm { .. } => {
             unreachable!("RenderWav/AttachWasm are served on the async branch")
         }
