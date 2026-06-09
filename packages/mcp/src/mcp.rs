@@ -426,7 +426,7 @@ impl EditorMcp {
 
     #[tool(
         description = "Attach a compiled WASM DSP module to an AudioWorklet node. \
-        Author a crate against awsm-audio-worklet (see the awsm://docs/worklet-abi \
+        Author a crate against awsm-audio-worklet (see the awsm-audio://docs/worklet-abi \
         resource), `cargo build --target wasm32-unknown-unknown --release`, then \
         pass the .wasm path here. On success the node's discovered params show up \
         in get_snapshot. A bad module returns the compile/ABI error."
@@ -571,7 +571,7 @@ impl ServerHandler for EditorMcp {
              tools (or dispatch_command / dispatch_batch for anything without a \
              dedicated tool), bounce a Sound and call render_wav / wav_stats / \
              waveform to inspect the result. To add a custom DSP node, read the \
-             awsm://docs/worklet-abi resource, author + build a worklet crate, and \
+             awsm-audio://docs/worklet-abi resource, author + build a worklet crate, and \
              attach it with the attach_wasm tool."
                 .to_string(),
         );
@@ -623,14 +623,14 @@ impl ServerHandler for EditorMcp {
         };
         Ok(ListResourcesResult::with_all_items(vec![
             res(
-                "awsm://docs/vocabulary",
+                "awsm-audio://docs/vocabulary",
                 "Command/query vocabulary",
                 "The JSON shapes for dispatch_command / run_query (node kinds, \
                  set_field, the sequencer + arrangement ops) — read this before \
                  using the escape hatches.",
             ),
             res(
-                "awsm://docs/worklet-abi",
+                "awsm-audio://docs/worklet-abi",
                 "Worklet ABI",
                 "How to author a WASM DSP worklet against awsm-audio-worklet, build \
                  it, and attach it with attach_wasm — with a minimal Gain example.",
@@ -644,8 +644,8 @@ impl ServerHandler for EditorMcp {
         _ctx: RequestContext<RoleServer>,
     ) -> Result<ReadResourceResult, McpError> {
         let body = match req.uri.as_str() {
-            "awsm://docs/vocabulary" => VOCABULARY_DOC,
-            "awsm://docs/worklet-abi" => WORKLET_ABI_DOC,
+            "awsm-audio://docs/vocabulary" => VOCABULARY_DOC,
+            "awsm-audio://docs/worklet-abi" => WORKLET_ABI_DOC,
             other => {
                 return Err(McpError::resource_not_found(
                     format!("unknown resource {other}"),
@@ -690,7 +690,7 @@ impl ServerHandler for EditorMcp {
     }
 }
 
-/// The command/query JSON-shape reference served as `awsm://docs/vocabulary`. It
+/// The command/query JSON-shape reference served as `awsm-audio://docs/vocabulary`. It
 /// pins the serde tagging the escape hatches (`dispatch_command` / `run_query`)
 /// expect, so an agent isn't guessing at `cmd`/`args`/`op` nesting.
 const VOCABULARY_DOC: &str = r#"# awsm-audio command/query vocabulary
@@ -795,7 +795,7 @@ graph you're editing.
    note). The root Sound is now a "song" — render_wav plays the sequence.
 "#;
 
-/// The worklet-authoring guide served both as the `awsm://docs/worklet-abi`
+/// The worklet-authoring guide served both as the `awsm-audio://docs/worklet-abi`
 /// resource and the `author_worklet` prompt, so an agent can write a correct
 /// crate without reading the repo.
 const WORKLET_ABI_DOC: &str = r#"# Authoring an awsm-audio WASM DSP worklet

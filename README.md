@@ -31,15 +31,102 @@ All crates are prefixed `awsm-audio-*`.
 Every editor mutation flows through a single **`EditorController`** — UI event
 handlers translate gestures into a serde-derived `EditorCommand` and call
 `dispatch`; nothing mutates state any other way. A serializable snapshot is the
-read half. This single command/query surface is the seam a future MCP/websocket
-transport drives — designed now, wired later. The JS-callable bridges
-(`editor_dispatch_toml`, `editor_snapshot_toml`, `editor_play`,
-`editor_export_wav`, `editor_attach_wasm`, …) live in `editor/src/main.rs`.
+read half. This single command/query surface is exactly the seam the **MCP
+server** drives (see below), so an AI agent and a human watching the same tab stay
+in sync. The JS-callable bridges (`editor_dispatch_toml`, `editor_snapshot_toml`,
+`editor_play`, `editor_export_wav`, `editor_attach_wasm`, …) live in
+`editor/src/main.rs`.
 
 The player auto-routes any terminal node (one whose output feeds nothing) into a
 master gain → analyser → speakers, so a graph plays without an explicit Output
 node. An **Output** node is an explicit sink; **Spatial Output** routes through an
 HRTF panner positioned in 3D.
+
+## Driving the editor from an AI agent (MCP)
+
+The editor can be driven by any MCP-capable agent (Claude Code, Claude Desktop,
+Codex, …): build node graphs, edit fields, author + attach WASM DSP worklets,
+drive the sequencer and arrangement timeline, render Sounds/arrangements offline,
+and read back WAV stats / waveform envelopes. Great for agent-in-the-loop sound
+design.
+
+```
+agent (MCP client) ──HTTP /mcp──▶ awsm-audio-mcp-server ──WebTransport/QUIC──▶ editor (browser tab)
+                                  (packages/mcp)            editor dials out   → EditorController
+```
+
+A native server ([`packages/mcp`](packages/mcp), `awsm-audio-mcp-server`) exposes
+MCP tools over streamable-HTTP and relays each one to a running editor tab over a
+WebTransport (QUIC) link that **the editor dials out to** (a browser tab can't be
+a server). The whole tool vocabulary is strongly typed — `tools/list` publishes
+the exact JSON Schema for every node kind, command, and query.
+
+### Quick start
+
+1. **Start the editor + the MCP server** (two processes; run together):
+
+   ```bash
+   task mcp-dev          # editor:dev + mcp:serve
+   # …or in two terminals: `task editor:dev` and `task mcp:serve`
+   ```
+
+   | Service | Address |
+   | --- | --- |
+   | Editor (Trunk) | `http://localhost:9170` |
+   | MCP + control HTTP | `http://127.0.0.1:9171` (`/mcp`, `/control`, `/debug`) |
+   | WebTransport link | UDP `9172` |
+
+   > **Chrome only.** The link uses WebTransport `serverCertificateHashes`, which
+   > is Chromium-only. The dev cert is regenerated on every server start, so after
+   > restarting `mcp:serve`, reload the tab.
+
+2. **Attach the editor** to the server: click the **MCP** button in the top bar,
+   or load the editor with `?mcp=` to auto-connect:
+
+   ```
+   http://localhost:9170/?mcp=http://127.0.0.1:9171
+   ```
+
+   The server logs `editor attached`; the top-bar button shows **MCP ✓** and a
+   **🤖 working… / idle** chip tells you when it's safe to edit / when a render is
+   done. (No connection → the editor runs normally with zero remote overhead.)
+
+3. **Point your agent at the server.** A ready-to-use [`.mcp.json`](.mcp.json) is
+   in the repo root:
+
+   ```json
+   {
+     "mcpServers": {
+       "awsm-audio": { "type": "http", "url": "http://127.0.0.1:9171/mcp" }
+     }
+   }
+   ```
+
+   - **Claude Code / Claude Desktop**: a project-root `.mcp.json` is picked up
+     automatically — restart the agent in this directory.
+   - **Other MCP clients**: register a streamable-HTTP MCP server at
+     `http://127.0.0.1:9171/mcp`.
+
+### What the agent can do
+
+Start with `get_snapshot` and `list_node_kinds` (every creatable kind with its
+default value, editable field keys, and a plain-language description). Then:
+
+- **Build** — `add_node`, `connect`, `set_field`, `remove_node`,
+  `set_active_sample` (edit a sub-sample / instrument).
+- **Sequence / arrange** — `dispatch_command` with `edit_song` / `edit_control` /
+  `edit_arrange`; `bounce`; `set_arrangement_markers` (loop/export region).
+- **Worklets** — author a crate against `awsm-audio-worklet`, `cargo build
+  --target wasm32-unknown-unknown --release`, then `attach_wasm { node, wasm_path }`.
+- **Render / read back** — `render_wav` (offline render of a Sound *or* an
+  arrangement timeline → `.wav` on disk), `wav_stats`, `waveform`, `get_transport`.
+- **Escape hatches** — `dispatch_command` / `dispatch_batch` / `run_query` accept
+  any `EditorCommand` / `EditorQuery` (typed schema, string-tolerant), so the
+  entire surface is reachable even without a dedicated tool.
+
+Two MCP resources document the rest: `awsm-audio://docs/vocabulary` (the
+command/query JSON shapes) and `awsm-audio://docs/worklet-abi` (authoring a
+worklet). Full design + transport details: [docs/plans/MCP.md](docs/plans/MCP.md).
 
 ## Nodes
 

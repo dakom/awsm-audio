@@ -101,7 +101,7 @@ arrangement op shapes). Closed at the source and verified live:
   current value (incl. a worklet's discovered params).
 - **`add_node`** now takes a bare kind-name string (`"oscillator"`) — the editor
   fills WebAudio defaults — or a full value; unknown names return a helpful error.
-- **`awsm://docs/vocabulary`** resource documents the `dispatch_command` /
+- **`awsm-audio://docs/vocabulary`** resource documents the `dispatch_command` /
   `run_query` JSON shapes + the multi-sample instrument+sequencer recipe.
 - **`set_active_sample`** unlocks editing a sub-sample's graph (the gap that had
   blocked building an instrument for a sequence).
@@ -125,7 +125,7 @@ Net: all **24** tools verified live (`get_snapshot`, `list_node_kinds`,
 `get_transport`, `get_bounce_status`, `render_wav`, `wav_stats`, `waveform`,
 `play`, `stop`, `add_node`, `remove_node`, `connect`, `set_field`, `bounce`,
 `set_root`, `set_active_sample`, `attach_wasm`, `dispatch_command`,
-`dispatch_batch`, `run_query`) plus the `awsm://docs/{vocabulary,worklet-abi}`
+`dispatch_batch`, `run_query`) plus the `awsm-audio://docs/{vocabulary,worklet-abi}`
 resources and the `author_worklet` prompt.
 
 ## Natively covered (unattended — green at every commit)
@@ -219,7 +219,7 @@ checklist below remains the reusable runbook for re-verifying after changes.
    that loading without `?mcp=` and connecting via the modal also works.
 8. **Worklet authoring (Phase 6):** via the MCP client, `add_node` an
    `audio_worklet` node; author a trivial `Gain` crate against
-   `awsm-audio-worklet` (the `awsm://docs/worklet-abi` resource has the recipe;
+   `awsm-audio-worklet` (the `awsm-audio://docs/worklet-abi` resource has the recipe;
    `packages/worklets/gain` is the worked example); `cargo build -p <crate>
    --target wasm32-unknown-unknown --release`; call `attach_wasm { node,
    wasm_path }`; confirm `get_snapshot` shows the discovered `gain` param, then

@@ -1198,7 +1198,7 @@ The ABI is already fully specified by the `awsm-audio-worklet` crate
    `AudioWorkletNode.parameters` (`WorkletParam`), editable / automatable /
    modulation-targetable like any node field.
 
-Expose this as an MCP **resource** (`awsm://docs/worklet-abi`, returning the
+Expose this as an MCP **resource** (`awsm-audio://docs/worklet-abi`, returning the
 above + a minimal `Gain` example) and an **`author_worklet` prompt** — the audio
 analog of the renderer's material-recipe resources. This is what lets the agent
 author a correct crate without reading the repo.
@@ -1289,7 +1289,7 @@ struct AttachWasmParams {
 }
 
 #[tool(description = "Attach a compiled WASM DSP module to an AudioWorklet node. \
-    Author a crate against awsm-audio-worklet (see the awsm://docs/worklet-abi resource), \
+    Author a crate against awsm-audio-worklet (see the awsm-audio://docs/worklet-abi resource), \
     `cargo build --target wasm32-unknown-unknown --release`, then pass the .wasm path here. \
     On success the node's discovered params show up in get_snapshot.")]
 async fn attach_wasm(&self, Parameters(p): Parameters<AttachWasmParams>) -> Result<CallToolResult, McpError> {
@@ -1313,7 +1313,7 @@ async fn attach_wasm(&self, Parameters(p): Parameters<AttachWasmParams>) -> Resu
 ```
 
 Also add the worklet docs to the `ServerHandler::list_resources`/`read_resource`
-(the `awsm://docs/worklet-abi` resource) and a `author_worklet` entry in
+(the `awsm-audio://docs/worklet-abi` resource) and a `author_worklet` entry in
 `list_prompts`/`get_prompt`.
 
 ### 6.5 Gate
@@ -1456,7 +1456,7 @@ re-verify.
       compile to wasm; pure WAV-math helpers have native unit tests.
 - [ ] Worklet path compiles: `Request::AttachWasm` round-trips (test);
       `attach_wasm_bytes_async` + the `attach_wasm` tool + the
-      `awsm://docs/worklet-abi` resource build; a scratch `Gain` worklet builds to
+      `awsm-audio://docs/worklet-abi` resource build; a scratch `Gain` worklet builds to
       `.wasm` (proves the author→compile half).
 - [ ] `task lint` passes at every committed checkpoint; no existing files
       rewrapped.

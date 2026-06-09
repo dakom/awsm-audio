@@ -1,6 +1,6 @@
 //! The minimal awsm-audio worklet: a stereo gain (each channel × the `gain`
 //! param). This is the reference an agent follows when authoring a worklet over
-//! MCP (see the `awsm://docs/worklet-abi` resource): implement [`Processor`] and
+//! MCP (see the `awsm-audio://docs/worklet-abi` resource): implement [`Processor`] and
 //! call [`awsm_worklet!`] once, then build to `wasm32-unknown-unknown`.
 //!
 //! ```sh
