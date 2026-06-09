@@ -44,15 +44,21 @@ pub fn render() -> Dom {
             .child(IconBtn::new("folder").title("Open project directory")
                 .on_click(open_project).render())
             .child(save_button())
-            // Export the active Sound to a .wav (offline render — the same audio a
-            // Bounce produces). Only meaningful in the Sounds view.
+            // Export the active sample to a .wav (offline render). Sounds export
+            // via the Bounce path; Arrangements render their clip timeline (the
+            // marked loop/export region if set, else start-to-finish).
             .child_signal(ctrl.view.signal().map(|view| {
-                (view == awsm_audio_schema::SampleKind::Sound).then(|| {
+                use awsm_audio_schema::SampleKind;
+                let title = match view {
+                    SampleKind::Arrangement => "Export this arrangement as a .wav",
+                    SampleKind::Sound => "Export this Sound as a .wav",
+                };
+                Some(
                     IconBtn::new("download")
-                        .title("Export this Sound as a .wav")
+                        .title(title)
                         .on_click(|| controller().export_active_wav())
-                        .render()
-                })
+                        .render(),
+                )
             }))
         }))
         .child(vdivider())
@@ -76,6 +82,9 @@ pub fn render() -> Dom {
             .child(IconBtn::new("help").title("How to use this editor")
                 .on_click(|| controller().open_help()).render())
         }))
+        .child(vdivider())
+        // MCP remote-control link (connect modal + reactive status).
+        .child(crate::ui::mcp_modal::button())
         // Spacer.
         .child(html!("div", { .style("flex", "1") }))
         // Transient status / error message (e.g. "wire an Output to play").
@@ -99,7 +108,6 @@ pub fn render() -> Dom {
             .child(play_button())
             .child(stop_button())
             .child(loop_button())
-            .child(record_button())
         }))
     })
 }
@@ -195,23 +203,6 @@ fn loop_button() -> Dom {
                     let next = !c.looping.get();
                     c.set_looping(next);
                 })
-                .render()
-        )))
-    })
-}
-
-/// Record the live output to a WAV (real-time start/stop toggle). Danger-styled
-/// while recording.
-fn record_button() -> Dom {
-    let ctrl = controller();
-    html!("div", {
-        .style("display", "flex")
-        .child_signal(ctrl.recording.signal().map(|rec| Some(
-            IconBtn::new("record")
-                .title("Record the live output to a .wav — click to start, again to stop & save")
-                .danger(rec)
-                .active(rec)
-                .on_click(|| controller().toggle_export())
                 .render()
         )))
     })

@@ -10,6 +10,7 @@ use crate::nodes::Node;
 
 /// A directed audio graph. Order of `nodes`/`connections` is preserved but not
 /// semantically meaningful; identity is by id.
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Graph {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -129,6 +130,7 @@ impl Graph {
 /// or wire a signal into it (which *adds* to the param, the native WebAudio
 /// modulation behavior). `default` is the value when nothing is set/wired.
 /// (Outlets ignore `default`.)
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PortDecl {
     pub id: PortId,

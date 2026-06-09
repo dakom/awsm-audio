@@ -15,6 +15,8 @@ mod node;
 pub mod snapshot;
 
 pub use command::{ArrangeOp, ControlOp, EditorCommand, EditorQuery, QueryResult, SongOp};
+// `Clipboard` (the serializable `Paste` payload) now lives in the protocol crate.
+pub use awsm_audio_editor_protocol::Clipboard;
 pub use node::{
     BoundaryPort, ConnId, ConnSink, DragState, EditorConnection, EditorNode, EnvDrag, PendingWire,
 };
@@ -171,9 +173,6 @@ pub struct EditorController {
     /// A transient status/error message shown in the transport (e.g. "wire an
     /// Output to play the sequence"). Cleared on the next successful play / stop.
     pub status: Mutable<Option<String>>,
-    /// Whether a real-time export capture is in progress — drives the Export
-    /// button's label (Export ⇄ ■ Stop & save).
-    pub recording: Mutable<bool>,
 }
 
 /// A stored sample: its schema data plus per-node canvas layout (node ids are
@@ -252,15 +251,6 @@ pub enum PaletteDrag {
     SampleRef,
 }
 
-/// A copy/paste payload (also the `Paste` command's argument, so a paste is an
-/// MCP-drivable command): nodes (kind + label + relative position) and the wires
-/// among them (endpoints are indices into `nodes`).
-#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
-pub struct Clipboard {
-    pub nodes: Vec<(awsm_audio_schema::NodeKind, String, f64, f64)>,
-    pub wires: Vec<(usize, u32, usize, ConnSink)>,
-}
-
 impl EditorController {
     fn new() -> Self {
         let ctrl = Self {
@@ -315,7 +305,6 @@ impl EditorController {
             samples_rev: Mutable::new(0),
             view: Mutable::new(awsm_audio_schema::SampleKind::Sound),
             status: Mutable::new(None),
-            recording: Mutable::new(false),
         };
         // Point active + root at the initial "main" sample.
         let id = ctrl.samples.borrow()[0].sample.id;
@@ -1342,6 +1331,60 @@ impl EditorController {
                 playhead: self.playhead.get(),
                 audio_state: self.audio_state(),
             }),
+            // Discovery: the creatable-node catalog (default value + field keys
+            // per kind) so an MCP agent can build a graph with zero schema
+            // knowledge.
+            EditorQuery::Catalog => {
+                use command::NodeKindInfo;
+                let mut out = Vec::new();
+                for section in crate::catalog::sections() {
+                    let section_name = section.name.to_string();
+                    for kind in section.kinds {
+                        let tag = serde_json::to_value(&kind)
+                            .ok()
+                            .and_then(|v| {
+                                v.get("kind").and_then(|k| k.as_str()).map(str::to_string)
+                            })
+                            .unwrap_or_default();
+                        let label = crate::ports::kind_label(&kind).to_string();
+                        let help = crate::catalog::doc(&kind);
+                        let fields = crate::fields::fields(&kind)
+                            .iter()
+                            .map(field_info)
+                            .collect();
+                        out.push(NodeKindInfo {
+                            kind: tag,
+                            label,
+                            section: section_name.clone(),
+                            description: help.body.to_string(),
+                            mdn: help.mdn.to_string(),
+                            example: kind,
+                            fields,
+                        });
+                    }
+                }
+                QueryResult::Catalog(out)
+            }
+            // Discovery: the editable fields of one live node (covers worklet
+            // nodes whose params are discovered at runtime).
+            EditorQuery::NodeFields { node } => {
+                let lock = self.nodes.lock_ref();
+                let fields = lock
+                    .iter()
+                    .find(|n| n.id == node)
+                    .map(|n| {
+                        let k = n.kind.borrow();
+                        crate::fields::fields(&k).iter().map(field_info).collect()
+                    })
+                    .unwrap_or_default();
+                QueryResult::NodeFields(fields)
+            }
+            // The WAV-readback queries need an async offline render, so the remote
+            // transport routes them to a dedicated async path (see `remote.rs`);
+            // they never reach this synchronous interpreter.
+            EditorQuery::WavStats { .. } | EditorQuery::Waveform { .. } => {
+                unreachable!("WavStats/Waveform are answered on the async render path")
+            }
         }
     }
 
@@ -1802,10 +1845,36 @@ impl EditorController {
     /// resolving each clip's source bounce, folding in track + clip gain, and
     /// applying the scrub seek (drop clips fully before it; trim the rest).
     fn arrangement_audio_clips(&self) -> Vec<awsm_audio_player::AudioClipPart> {
-        let Some(arr) = self.active_arrangement() else {
-            return Vec::new();
-        };
-        let seek = self.arrange_start.get().max(0.0);
+        self.active_arrangement()
+            .map(|arr| self.clips_of(&arr, self.arrange_start.get().max(0.0)))
+            .unwrap_or_default()
+    }
+
+    /// The stored [`Arrangement`](awsm_audio_schema::Arrangement) of sample `id`
+    /// (any sample, not just the active one — arrangement edits write straight to
+    /// `sample.arrangement`). `None` if `id` isn't an Arrangement sample.
+    fn arrangement_for(
+        &self,
+        id: awsm_audio_schema::SampleId,
+    ) -> Option<awsm_audio_schema::Arrangement> {
+        self.samples
+            .borrow()
+            .iter()
+            .find(|s| {
+                s.sample.id == id && s.sample.kind == awsm_audio_schema::SampleKind::Arrangement
+            })
+            .map(|s| s.sample.arrangement.clone())
+    }
+
+    /// Build the schedulable audio clips of `arr`, seek-adjusted so a clip's audio
+    /// is relative to `seek` seconds on the timeline. Shared by live playback
+    /// (seek = scrub position) and offline export (seek = window start).
+    fn clips_of(
+        &self,
+        arr: &awsm_audio_schema::Arrangement,
+        seek: f64,
+    ) -> Vec<awsm_audio_player::AudioClipPart> {
+        let seek = seek.max(0.0);
         // If any track is soloed, only soloed tracks play (and mute still wins).
         let any_solo = arr.tracks.iter().any(|t| t.solo);
         let mut out = Vec::new();
@@ -1859,6 +1928,40 @@ impl EditorController {
         }
     }
 
+    /// Set the loop/export **in** marker to the current playhead (keeps the out).
+    pub fn arrange_set_loop_in(&self) {
+        let start = self.arrange_start_secs();
+        let end = self.active_arrangement().and_then(|a| a.loop_end);
+        self.dispatch(EditorCommand::EditArrange {
+            op: ArrangeOp::SetMarkers {
+                start: Some(start),
+                end,
+            },
+        });
+    }
+
+    /// Set the loop/export **out** marker to the current playhead (keeps the in).
+    pub fn arrange_set_loop_out(&self) {
+        let end = self.arrange_start_secs();
+        let start = self.active_arrangement().and_then(|a| a.loop_start);
+        self.dispatch(EditorCommand::EditArrange {
+            op: ArrangeOp::SetMarkers {
+                start,
+                end: Some(end),
+            },
+        });
+    }
+
+    /// Clear the loop/export markers (loop + export span the whole timeline).
+    pub fn arrange_clear_loop(&self) {
+        self.dispatch(EditorCommand::EditArrange {
+            op: ArrangeOp::SetMarkers {
+                start: None,
+                end: None,
+            },
+        });
+    }
+
     /// The live arrangement playhead in seconds (scrub start + elapsed), or `None`
     /// when not performing an arrangement. Driven each frame by the waveform loop.
     pub fn arrangement_playhead_secs(&self) -> Option<f64> {
@@ -1875,6 +1978,15 @@ impl EditorController {
     fn play_arrangement_sample(&self) {
         self.loop_arrangement.set(true);
         self.status.set(None);
+        // Loop/export markers, when set, drive the playback window: start at the
+        // marker start and loop the marked region.
+        if let Some(arr) = self.active_arrangement() {
+            if arr.has_markers() {
+                let (s, _) = arr.range();
+                self.arrange_start.set(s);
+                self.arrange_playhead.set(s);
+            }
+        }
         let clips = self.arrangement_audio_clips();
         if clips.is_empty() {
             self.status.set(Some(
@@ -1898,7 +2010,14 @@ impl EditorController {
         if self.looping.get() {
             let region = self
                 .active_arrangement()
-                .map(|a| (a.length_secs - self.arrange_start.get().max(0.0)).max(0.1))
+                .map(|a| {
+                    if a.has_markers() {
+                        let (s, e) = a.range();
+                        (e - s).max(0.1)
+                    } else {
+                        (a.length_secs - self.arrange_start.get().max(0.0)).max(0.1)
+                    }
+                })
                 .unwrap_or(0.0);
             if region > 0.1 {
                 self.song_loop_secs.set(region);
@@ -2577,6 +2696,17 @@ impl EditorController {
             ArrangeOp::SetLengthSecs(v) => {
                 self.edit_arrange(false, |a| a.length_secs = v.clamp(1.0, 3600.0))
             }
+            ArrangeOp::SetMarkers { start, end } => self.edit_arrange(true, |a| {
+                // Normalize: clamp into the timeline, keep start < end, or clear.
+                a.loop_start = start.map(|s| s.clamp(0.0, a.length_secs));
+                a.loop_end = end.map(|e| e.clamp(0.0, a.length_secs));
+                if let (Some(s), Some(e)) = (a.loop_start, a.loop_end) {
+                    if e <= s {
+                        a.loop_start = None;
+                        a.loop_end = None;
+                    }
+                }
+            }),
             ArrangeOp::AddTrack => self.edit_arrange(true, |a| {
                 let n = a.tracks.len() + 1;
                 a.tracks.push(ArrTrack {
@@ -3122,6 +3252,64 @@ impl EditorController {
         Some((job, sample.name.clone()))
     }
 
+    /// Render a Sound (or the project root when `None`) offline to PCM, without
+    /// storing it — the shared entry point for the MCP WAV readbacks
+    /// (`RenderWav`/`WavStats`/`Waveform`). Reuses [`bounce_job_for`] +
+    /// [`awsm_audio_player::bounce::render`], the same path Bounce/export use; an
+    /// optional `sample_rate` overrides the bounce rate.
+    pub async fn render_pcm(
+        &self,
+        sample: Option<awsm_audio_schema::SampleId>,
+        sample_rate: Option<f32>,
+    ) -> Result<(Vec<Vec<f32>>, u32), String> {
+        let id = sample.unwrap_or_else(|| *self.root.borrow());
+        // Arrangements render through their clip timeline, not the bounce graph.
+        if self.arrangement_for(id).is_some() {
+            return self.render_arrangement_pcm(id).await;
+        }
+        let (mut job, _label) = self
+            .bounce_job_for(id)
+            .ok_or_else(|| "nothing to render".to_string())?;
+        if let Some(sr) = sample_rate {
+            job.sample_rate = sr;
+        }
+        awsm_audio_player::bounce::render(job)
+            .await
+            .map_err(|e| format!("{e}"))
+    }
+
+    /// Offline-render the Arrangement sample `id` over its effective window (the
+    /// loop/export markers if set, else the whole timeline) to PCM — the analog of
+    /// [`render_pcm`](Self::render_pcm) for arrangements. Clips must already be
+    /// bounced (their PCM lives in the player); unbounced clips are skipped.
+    pub async fn render_arrangement_pcm(
+        &self,
+        id: awsm_audio_schema::SampleId,
+    ) -> Result<(Vec<Vec<f32>>, u32), String> {
+        let arr = self
+            .arrangement_for(id)
+            .ok_or_else(|| "not an arrangement".to_string())?;
+        let (start, end) = arr.range();
+        let duration = (end - start).max(0.05);
+        let clips = self.clips_of(&arr, start);
+        if clips.is_empty() {
+            return Err("nothing to render (bounce a Sound and drop it on a track)".into());
+        }
+        if !self.ensure_player() {
+            return Err("audio player unavailable".into());
+        }
+        let (buffers, sr) = {
+            let p = self.player.borrow();
+            let p = p
+                .as_ref()
+                .ok_or_else(|| "audio player unavailable".to_string())?;
+            (p.clip_buffers(), p.sample_rate() as f32)
+        };
+        awsm_audio_player::bounce::render_clips(clips, buffers, sr, duration)
+            .await
+            .map_err(|e| format!("{e}"))
+    }
+
     /// Render a Sound to an audio buffer (offline) and store it as the sample's
     /// bounce — so arrangement clips can play + draw it. Async; bumps `samples_rev`
     /// when done. No-op for an Arrangement sample.
@@ -3172,18 +3360,32 @@ impl EditorController {
         });
     }
 
-    /// Offline-render the **active** Sound and download it as a `.wav` — the same
-    /// render path as a Bounce, but exported to a file instead of stored as a clip
-    /// source. Handy for grabbing an individual Sound as audio.
+    /// Offline-render the **active** sample and download it as a `.wav`. For a
+    /// Sound this is the Bounce render path; for an Arrangement it renders the
+    /// effective window (the loop/export markers if set, else start-to-finish).
+    /// The same offline render in both cases — no real-time capture.
     pub fn export_active_wav(&self) {
         let id = *self.active.borrow();
-        let Some((job, name)) = self.bounce_job_for(id) else {
-            return;
-        };
+        let is_arrangement = self.samples.borrow().iter().any(|s| {
+            s.sample.id == id && s.sample.kind == awsm_audio_schema::SampleKind::Arrangement
+        });
+        let name = self
+            .samples
+            .borrow()
+            .iter()
+            .find(|s| s.sample.id == id)
+            .map(|s| s.sample.name.clone())
+            .unwrap_or_else(|| "export".into());
+
         let ctrl = self.clone();
         self.status.set(Some(format!("Exporting “{name}”…")));
         wasm_bindgen_futures::spawn_local(async move {
-            match awsm_audio_player::bounce::render(job).await {
+            let rendered = if is_arrangement {
+                ctrl.render_arrangement_pcm(id).await
+            } else {
+                ctrl.render_pcm(Some(id), None).await
+            };
+            match rendered {
                 Ok((channels, sr)) => {
                     let wav = crate::util::encode_wav(&channels, sr);
                     let filename = format!("{}.wav", sanitize_filename(&name));
@@ -3572,75 +3774,6 @@ impl EditorController {
                 buf
             }
             None => Vec::new(),
-        }
-    }
-
-    /// Render the current graph offline for `seconds` and download it as a WAV.
-    /// (Worklet nodes are silent in the offline render — a documented v1 limit.)
-    /// Whether a real-time export is currently capturing.
-    pub fn is_recording(&self) -> bool {
-        self.player
-            .borrow()
-            .as_ref()
-            .map(|p| p.is_recording())
-            .unwrap_or(false)
-    }
-
-    /// Export to WAV by **recording the live output in real time** — so an export
-    /// sounds exactly like Play (same scheduler, voices, worklets, everything). A
-    /// start/stop toggle: the first call begins recording + playback, the second
-    /// stops and downloads the `.wav`. (A toggle, not auto-stop, so the download
-    /// always fires from a user gesture — browsers block programmatic downloads
-    /// that aren't.)
-    pub fn toggle_export(&self) {
-        if self.is_recording() {
-            self.finish_recording();
-            return;
-        }
-        if !self.ensure_player() {
-            return;
-        }
-        if let Some(p) = self.player.borrow_mut().as_mut() {
-            if let Err(e) = p.start_recording() {
-                tracing::error!("start_recording: {e}");
-                self.status
-                    .set(Some("Couldn't start recording for export.".into()));
-                return;
-            }
-        }
-        self.recording.set(true);
-        // Play exactly as Play does (view-aware), then capture the master output.
-        self.play();
-        self.status.set(Some(
-            "\u{25CF} Recording the live output… click Export again to stop & save the .wav."
-                .into(),
-        ));
-    }
-
-    /// Stop the live export capture, encode the captured audio to WAV, and
-    /// download it.
-    fn finish_recording(&self) {
-        self.recording.set(false);
-        self.stop(); // stop playback (also clears the status)
-        let captured = self
-            .player
-            .borrow_mut()
-            .as_mut()
-            .and_then(|p| p.stop_recording());
-        match captured {
-            Some((channels, sr)) if !channels.is_empty() => {
-                let wav = crate::util::encode_wav(&channels, sr);
-                if let Err(e) = crate::util::download_bytes("export.wav", &wav, "audio/wav") {
-                    tracing::error!("download wav: {e:?}");
-                    self.status.set(Some("Export failed to download.".into()));
-                }
-            }
-            _ => {
-                tracing::warn!("export captured no audio");
-                self.status.set(Some(
-                    "Export captured no audio (was anything playing?).".into(),
-                ));
-            }
         }
     }
 
@@ -4488,47 +4621,66 @@ impl EditorController {
     /// discover params, register (compiled in the player, base64 source here), and
     /// wire it onto the node. Shared by the file picker and the MCP/command seam.
     pub fn attach_wasm_bytes(&self, node: NodeId, bytes: Vec<u8>, label: String) {
+        let ctrl = self.clone();
+        wasm_bindgen_futures::spawn_local(async move {
+            if let Err(e) = ctrl.attach_wasm_bytes_async(node, bytes, label).await {
+                tracing::error!("attach wasm failed: {e}");
+            }
+        });
+    }
+
+    /// Fallible async variant of [`attach_wasm_bytes`]. Compiles the module,
+    /// discovers its params, registers it, and wires it onto the node, returning
+    /// the compile/ABI error (a human-readable string) instead of only logging
+    /// it. The MCP `AttachWasm` path awaits this so a bad module surfaces to the
+    /// agent; the file picker keeps the fire-and-forget [`attach_wasm_bytes`]
+    /// wrapper.
+    pub async fn attach_wasm_bytes_async(
+        &self,
+        node: NodeId,
+        bytes: Vec<u8>,
+        label: String,
+    ) -> Result<(), String> {
         if !self.ensure_player() {
-            return;
+            return Err("audio player unavailable".into());
         }
         let asset = awsm_audio_schema::AssetId::new();
         let player = self.player.clone();
-        let ctrl = self.clone();
-        wasm_bindgen_futures::spawn_local(async move {
-            if !ctrl.ensure_worklet_shim(&player).await {
-                return;
+        if !self.ensure_worklet_shim(&player).await {
+            return Err("worklet shim failed to load".into());
+        }
+        let u8 = js_sys::Uint8Array::from(bytes.as_slice());
+        let module = match wasm_bindgen_futures::JsFuture::from(
+            awsm_audio_player::Player::compile_module(&u8),
+        )
+        .await
+        {
+            Ok(m) => m.unchecked_into::<js_sys::WebAssembly::Module>(),
+            Err(e) => {
+                return Err(format!(
+                    "WebAssembly.compile failed (not a valid module?): {e:?}"
+                ));
             }
-            let u8 = js_sys::Uint8Array::from(bytes.as_slice());
-            let module = match wasm_bindgen_futures::JsFuture::from(
-                awsm_audio_player::Player::compile_module(&u8),
-            )
-            .await
-            {
-                Ok(m) => m.unchecked_into::<js_sys::WebAssembly::Module>(),
-                Err(e) => {
-                    tracing::error!("WebAssembly.compile failed (not a valid module?): {e:?}");
-                    return;
-                }
-            };
+        };
 
-            // Discover params (instantiate once on the main thread).
-            let params = discover_params(&module);
+        // Discover params (instantiate once on the main thread).
+        let params = discover_params(&module);
 
-            // Register: compiled module in the player, serializable source here.
-            if let Some(p) = player.borrow_mut().as_mut() {
-                p.store_module(asset, module);
-            }
-            let b64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &bytes);
-            ctrl.wasm_assets.borrow_mut().insert(
-                asset,
-                awsm_audio_schema::WasmAsset {
-                    id: asset,
-                    label: Some(label.clone()),
-                    source: awsm_audio_schema::WasmSource::Base64(b64),
-                },
-            );
-            ctrl.set_node_module(node, asset, label, params);
-        });
+        // Register: compiled module in the player, serializable source here.
+        if let Some(p) = player.borrow_mut().as_mut() {
+            p.store_module(asset, module);
+        }
+        let b64 = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &bytes);
+        self.wasm_assets.borrow_mut().insert(
+            asset,
+            awsm_audio_schema::WasmAsset {
+                id: asset,
+                label: Some(label.clone()),
+                source: awsm_audio_schema::WasmSource::Base64(b64),
+            },
+        );
+        self.set_node_module(node, asset, label, params);
+        Ok(())
     }
 
     /// Ensure the worklet shim has been added to the player's context. Returns
@@ -4936,6 +5088,38 @@ fn call_f64(exports: &js_sys::Object, name: &str, arg: Option<f64>) -> Option<f6
 /// Fetch a URL into an `ArrayBuffer` (for URL-sourced buffer / wasm assets).
 /// A filesystem-safe download name for a Sound (`"Wobble Bass"` → `"Wobble-Bass"`),
 /// falling back to `"sound"` when nothing usable remains.
+/// Project an editor [`fields::Field`](crate::fields::Field) into the
+/// serializable [`FieldInfo`](command::FieldInfo) the MCP discovery queries
+/// (`Catalog` / `NodeFields`) return — so an agent learns a node's `set_field`
+/// keys, control type, and current value without knowing the schema.
+fn field_info(f: &crate::fields::Field) -> command::FieldInfo {
+    use crate::fields::Control;
+    let (control, value_num, value_text, options) = match &f.control {
+        Control::Number(n) => ("number".to_string(), Some(*n), None, Vec::new()),
+        Control::Choice { value, options } => (
+            "choice".to_string(),
+            None,
+            Some(value.clone()),
+            options.iter().map(|s| s.to_string()).collect(),
+        ),
+        Control::Bool(b) => (
+            "bool".to_string(),
+            Some(if *b { 1.0 } else { 0.0 }),
+            None,
+            Vec::new(),
+        ),
+    };
+    command::FieldInfo {
+        key: f.key.to_string(),
+        label: f.label.to_string(),
+        control,
+        value_num,
+        value_text,
+        options,
+        modulatable: f.modulation.is_some(),
+    }
+}
+
 fn sanitize_filename(name: &str) -> String {
     let s: String = name
         .trim()

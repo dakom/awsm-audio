@@ -14,6 +14,7 @@ use crate::enums::AutomationRate;
 /// Field order matters for TOML: the scalar `value`/`automation_rate` are
 /// declared before the `automation` array-of-tables, since TOML requires a
 /// table's scalar keys to be emitted ahead of any sub-tables.
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AudioParam {
     /// The intrinsic base value (`AudioParam.value` / `setValueAtTime` floor).
@@ -51,6 +52,7 @@ impl Default for AudioParam {
 /// One scheduled change on an [`AudioParam`] timeline. Mirrors the
 /// `AudioParam` scheduling methods one-to-one. Adjacently tagged (`event` +
 /// `args`) so it round-trips cleanly through TOML.
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "event", content = "args")]
 pub enum AutomationEvent {
@@ -82,6 +84,7 @@ pub enum AutomationEvent {
 /// WebAudio param names (`"frequency"`, `"gain"`, `"Q"`, …); for
 /// [`AudioWorkletNode`](crate::AudioWorkletNode)s and referenced-sample macros
 /// it's the author-defined name. Validated against the node it targets.
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct ParamId(pub String);

@@ -10,7 +10,10 @@ use std::cell::RefCell;
 use std::collections::HashSet;
 
 use awsm_audio_schema::*;
-use serde::{Deserialize, Serialize};
+
+// `FieldValue` (the serializable `SetField` payload) now lives in the shared
+// protocol crate; the live `Field`/`Control` reflection below stays here.
+pub use awsm_audio_editor_protocol::FieldValue;
 
 thread_local! {
     /// Interned param names. WASM-worklet params are discovered at runtime, but
@@ -32,15 +35,6 @@ fn intern(s: &str) -> &'static str {
         set.insert(leaked);
         leaked
     })
-}
-
-/// A single editable value flowing through the `SetField` command.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case", tag = "t", content = "v")]
-pub enum FieldValue {
-    Num(f64),
-    Text(String),
-    Bool(bool),
 }
 
 /// What control to render for a field.

@@ -642,6 +642,10 @@ fn keyed_connections_and_sample_kind_round_trip() {
 }
 
 #[test]
+// `midly::Track` is a `Vec`; building it with sequential `push`es here is the
+// clearest form. (Silences a newer-clippy `vec_init_then_push` than the repo's
+// pinned CI toolchain — see docs/plans/MCP-STATUS.md.)
+#[allow(clippy::vec_init_then_push)]
 fn parse_smf_round_trips_notes_and_tempo() {
     use midly::num::{u15, u24, u28, u4, u7};
     use midly::{

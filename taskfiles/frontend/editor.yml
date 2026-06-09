@@ -14,6 +14,7 @@ tasks:
     desc: "editor: trunk serve (WebAudio editor)"
     env:
       ROOT_BASE_URI_PATH: "{{.DEV_ROOT_BASE_URI_PATH}}"
+      MCP_DEFAULT_ORIGIN: "{{.URL_MCP_DEFAULT}}"
     cmds:
       - >
         cd {{.PATH_CRATE}} &&
@@ -25,6 +26,7 @@ tasks:
     desc: "editor: production build"
     env:
       ROOT_BASE_URI_PATH: "{{.PROD_ROOT_BASE_URI_PATH}}/editor"
+      MCP_DEFAULT_ORIGIN: "{{.URL_MCP_DEFAULT}}"
     cmds:
       - rm -rf {{joinPath .PATH_CRATE "dist"}}
       - rm -rf {{.PATH_DIST}}

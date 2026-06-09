@@ -12,12 +12,22 @@ use serde::{Deserialize, Serialize};
 use crate::ids::{AssetId, SampleId};
 
 /// A whole arrangement: a tempo (for the grid), a length in seconds, and tracks.
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Arrangement {
     /// Tempo in BPM — used only to draw the bar/beat grid and snap edits.
     pub bpm: f64,
     /// Timeline length in seconds (the ruler extent).
     pub length_secs: f64,
+    /// Optional loop/export start marker, in seconds. When both markers are set
+    /// (and `end > start`), playback loops this region and export renders exactly
+    /// it; otherwise both span the whole timeline (`0..length_secs`). Toggled on
+    /// and off from the Arrange-view ruler.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub loop_start: Option<f64>,
+    /// Optional loop/export end marker, in seconds. See [`loop_start`](Self::loop_start).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub loop_end: Option<f64>,
     /// The tracks, top to bottom.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tracks: Vec<ArrTrack>,
@@ -28,6 +38,8 @@ impl Default for Arrangement {
         Self {
             bpm: 120.0,
             length_secs: 32.0,
+            loop_start: None,
+            loop_end: None,
             tracks: Vec::new(),
         }
     }
@@ -38,9 +50,24 @@ impl Arrangement {
     pub fn is_empty(&self) -> bool {
         self.tracks.is_empty()
     }
+
+    /// Whether explicit loop/export markers are active (both set, `end > start`).
+    pub fn has_markers(&self) -> bool {
+        matches!((self.loop_start, self.loop_end), (Some(s), Some(e)) if e > s)
+    }
+
+    /// The effective `(start, end)` window in seconds for playback-loop and
+    /// export: the markers when active, else the whole timeline `(0, length_secs)`.
+    pub fn range(&self) -> (f64, f64) {
+        match (self.loop_start, self.loop_end) {
+            (Some(s), Some(e)) if e > s => (s.max(0.0), e),
+            _ => (0.0, self.length_secs),
+        }
+    }
 }
 
 /// One horizontal lane of audio clips.
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ArrTrack {
     /// Display name (e.g. "Bass", "Drums").
@@ -75,6 +102,7 @@ impl Default for ArrTrack {
 /// waveform and audio come from `source`'s [`Bounce`](crate::Bounce); an un-bounced
 /// source can't play. Blade/trim produce clips that share a source with different
 /// `offset` / `length`.
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Clip {
     /// Start position on the timeline, in seconds.
@@ -127,6 +155,7 @@ fn is_one(v: &f32) -> bool {
 /// A sample's rendered audio: the buffer asset it bounced to, plus a hash of the
 /// source graph at bounce time so the editor can flag the bounce as **dirty** when
 /// the Sound is edited afterward.
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Bounce {
     /// The rendered [`BufferAsset`](crate::BufferAsset) id.

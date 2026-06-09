@@ -4,56 +4,15 @@
 //! layout, camera, selection). This is what a future MCP transport reads back.
 
 use awsm_audio_schema::{
-    Connection, ConnectionSink, ConnectionSource, Graph, Node, NodeId, Sample, SampleLibrary,
+    Connection, ConnectionSink, ConnectionSource, Graph, Node, Sample, SampleLibrary,
 };
-use serde::{Deserialize, Serialize};
+
+// The struct *definitions* (`NodeLayout`/`EditorSnapshot`/`EditorProject`) now
+// live in the shared protocol crate; the `impl EditorController` blocks below
+// that *build* them stay here (they reach into controller internals).
+pub use awsm_audio_editor_protocol::{EditorProject, EditorSnapshot, NodeLayout};
 
 use super::EditorController;
-
-/// World position of one node — the layout the schema deliberately omits.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct NodeLayout {
-    pub id: NodeId,
-    pub x: f64,
-    pub y: f64,
-}
-
-/// A complete, serializable view of the editor: the audio graph plus the
-/// view-state needed to reconstruct the canvas exactly.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct EditorSnapshot {
-    pub graph: Graph,
-    pub layout: Vec<NodeLayout>,
-    pub pan_x: f64,
-    pub pan_y: f64,
-    pub zoom: f64,
-    pub selection: Vec<NodeId>,
-    /// The active sample's Arrangement, if it is one — so undo/redo covers
-    /// timeline edits, which don't live on the node canvas. `None` otherwise.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub arrangement: Option<awsm_audio_schema::Arrangement>,
-}
-
-fn one() -> f64 {
-    1.0
-}
-
-/// The on-disk editor *project*: the portable [`SampleLibrary`] (graph + embedded
-/// assets the player consumes) plus editor-only extras (node layout + camera) so
-/// reopening restores the canvas exactly. A bare `SampleLibrary` (e.g. an
-/// example) also opens — it just gets auto-laid-out.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct EditorProject {
-    pub library: SampleLibrary,
-    #[serde(default)]
-    pub layout: Vec<NodeLayout>,
-    #[serde(default)]
-    pub pan_x: f64,
-    #[serde(default)]
-    pub pan_y: f64,
-    #[serde(default = "one")]
-    pub zoom: f64,
-}
 
 impl EditorController {
     /// Project the canvas into a pure-audio schema [`Graph`] (no layout).

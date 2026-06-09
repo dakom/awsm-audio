@@ -11,12 +11,9 @@ mod build;
 mod noise;
 pub mod worklet;
 
-use std::cell::RefCell;
 use std::collections::HashMap;
-use std::rc::Rc;
 
 use anyhow::Result;
-use wasm_bindgen::closure::Closure;
 use wasm_bindgen::JsCast;
 use wasm_bindgen::JsValue;
 use web_sys::{
@@ -51,8 +48,6 @@ pub struct Player {
     /// the trigger scheduler can spawn voices into an instrument-ref's voice-bus
     /// gain. Empty otherwise; cleared on `stop`.
     bus_nodes: Vec<(NodeId, AudioNode)>,
-    /// The active real-time export recorder, if one is running.
-    rec: Option<Recorder>,
     /// Decoded audio buffers, keyed by the schema asset id a buffer source
     /// references. Survives play/stop so a clip only decodes once.
     buffers: HashMap<AssetId, AudioBuffer>,
@@ -130,17 +125,6 @@ struct Voice {
     sources: Vec<AudioScheduledSourceNode>,
     /// When the sources are scheduled to stop.
     stop_at: f64,
-}
-
-/// A live recorder: a ScriptProcessor tapping the master bus, accumulating its
-/// input samples per channel for a real-time WAV export.
-struct Recorder {
-    node: web_sys::ScriptProcessorNode,
-    /// The onaudioprocess closure, kept alive while recording.
-    _cb: Closure<dyn FnMut(web_sys::AudioProcessingEvent)>,
-    /// Captured samples, one Vec per channel.
-    data: Rc<RefCell<Vec<Vec<f32>>>>,
-    sample_rate: u32,
 }
 
 impl Voice {
@@ -325,7 +309,6 @@ impl Player {
             params: Vec::new(),
             song_voices: Vec::new(),
             bus_nodes: Vec::new(),
-            rec: None,
             buffers: HashMap::new(),
             modules: HashMap::new(),
             worklet_ready: false,
@@ -498,80 +481,6 @@ impl Player {
         }
     }
 
-    /// Whether a real-time export recording is in progress.
-    pub fn is_recording(&self) -> bool {
-        self.rec.is_some()
-    }
-
-    /// Begin capturing the master output to memory for a real-time WAV export: a
-    /// ScriptProcessor taps the master bus and accumulates its input per channel.
-    /// It outputs silence (the existing master→destination path is the monitor),
-    /// so recording is inaudible-by-itself and doesn't double the signal.
-    pub fn start_recording(&mut self) -> Result<()> {
-        if self.rec.is_some() {
-            return Ok(());
-        }
-        let node = self
-            .ctx
-            .create_script_processor_with_buffer_size_and_number_of_input_channels_and_number_of_output_channels(4096, 2, 2)
-            .map_err(|e| anyhow::anyhow!("script processor: {e:?}"))?;
-        let data: Rc<RefCell<Vec<Vec<f32>>>> = Rc::new(RefCell::new(vec![Vec::new(), Vec::new()]));
-        let d2 = data.clone();
-        let cb = Closure::<dyn FnMut(web_sys::AudioProcessingEvent)>::new(
-            move |e: web_sys::AudioProcessingEvent| {
-                if let Ok(inp) = e.input_buffer() {
-                    let nch = (inp.number_of_channels() as usize).min(2);
-                    let len = inp.length() as usize;
-                    let mut store = d2.borrow_mut();
-                    for ch in 0..nch {
-                        let mut tmp = vec![0.0f32; len];
-                        if inp.copy_from_channel(&mut tmp, ch as i32).is_ok() {
-                            store[ch].extend_from_slice(&tmp);
-                        }
-                    }
-                }
-                // Emit silence so the tap doesn't re-inject audio downstream.
-                if let Ok(out) = e.output_buffer() {
-                    let len = out.length() as usize;
-                    let silent = vec![0.0f32; len];
-                    for ch in 0..out.number_of_channels() {
-                        let _ = out.copy_to_channel(&silent, ch as i32);
-                    }
-                }
-            },
-        );
-        node.set_onaudioprocess(Some(cb.as_ref().unchecked_ref()));
-        self.master
-            .connect_with_audio_node(&node)
-            .map_err(|e| anyhow::anyhow!("master→recorder: {e:?}"))?;
-        node.connect_with_audio_node(&self.ctx.destination())
-            .map_err(|e| anyhow::anyhow!("recorder→dest: {e:?}"))?;
-        self.rec = Some(Recorder {
-            node,
-            _cb: cb,
-            data,
-            sample_rate: self.ctx.sample_rate() as u32,
-        });
-        Ok(())
-    }
-
-    /// Stop recording and return the captured `(channels, sample_rate)` for WAV
-    /// encoding. `None` if not recording.
-    pub fn stop_recording(&mut self) -> Option<(Vec<Vec<f32>>, u32)> {
-        let rec = self.rec.take()?;
-        // Detach the processing callback first (so no further appends happen),
-        // then take the captured samples out of the shared cell. We move them out
-        // rather than `Rc::try_unwrap` because the (still-alive) onaudioprocess
-        // closure holds a second `Rc` to the same buffer.
-        rec.node.set_onaudioprocess(None);
-        let _ = self.master.disconnect_with_audio_node(&rec.node);
-        let _ = rec.node.disconnect();
-        let channels = std::mem::take(&mut *rec.data.borrow_mut());
-        // Drop empty trailing channels (mono captures leave channel 1 empty).
-        let channels: Vec<Vec<f32>> = channels.into_iter().filter(|c| !c.is_empty()).collect();
-        Some((channels, rec.sample_rate))
-    }
-
     /// Stop and disconnect the current instance (the master chain stays intact),
     /// plus every scheduled song voice.
     pub fn stop(&mut self) {
@@ -597,6 +506,13 @@ impl Player {
     /// The context sample rate (Hz).
     pub fn sample_rate(&self) -> u32 {
         self.ctx.sample_rate() as u32
+    }
+
+    /// A clone of the decoded/rendered buffer registry (AudioBuffers are
+    /// context-independent), for handing to the offline arrangement renderer
+    /// ([`bounce::render_clips`](crate::bounce::render_clips)).
+    pub fn clip_buffers(&self) -> std::collections::HashMap<AssetId, AudioBuffer> {
+        self.buffers.clone()
     }
 
     /// Whether a decoded/rendered buffer is registered under `id`.

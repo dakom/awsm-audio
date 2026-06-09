@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 use crate::ids::AssetId;
 
 /// Every shared asset a [`SampleLibrary`](crate::SampleLibrary) draws on.
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct AssetTable {
     /// Decoded/decodable audio, referenced by
@@ -25,6 +26,7 @@ pub struct AssetTable {
 
 /// A WASM DSP module for an [`AudioWorkletNode`]: either a URL the player
 /// fetches, or inline base64-encoded bytes (keeps a project self-contained).
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct WasmAsset {
     pub id: AssetId,
@@ -35,6 +37,7 @@ pub struct WasmAsset {
 
 /// Where a [`WasmAsset`]'s bytes come from. Adjacently tagged (`kind` + `data`)
 /// so it round-trips cleanly through TOML.
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "kind", content = "data")]
 pub enum WasmSource {
@@ -50,6 +53,7 @@ pub enum WasmSource {
 
 /// An audio buffer: either a URL the player fetches + `decodeAudioData`s, or
 /// inline raw PCM (one `Vec<f32>` per channel).
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct BufferAsset {
     pub id: AssetId,
@@ -60,6 +64,7 @@ pub struct BufferAsset {
 
 /// Where a [`BufferAsset`]'s samples come from. Adjacently tagged (`kind` +
 /// `data`) so it round-trips cleanly through TOML.
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "kind", content = "data")]
 pub enum AudioSource {

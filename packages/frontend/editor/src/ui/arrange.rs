@@ -492,6 +492,25 @@ fn timeline(arr: &Arrangement, total: f64) -> Dom {
                 (if s < 0.0 { "0" } else { "0.9" }).to_string()
             }))
         }))
+        // Loop/export region: a shaded band between the markers (when set).
+        .apply(|d| match arr.has_markers().then(|| arr.range()) {
+            Some((s, e)) => d.child(html!("div", {
+                .style("position", "absolute")
+                .style("top", "0")
+                .style("left", "0")
+                .style("margin-left", &format!("{HDR_W}px"))
+                .style("height", &format!("{}px", RULER_H + arr.tracks.len() as f64 * row_h()))
+                .style("transform", &format!("translateX({}px)", s * pps()))
+                .style("width", &format!("{}px", ((e - s) * pps()).max(1.0)))
+                .style("background", "oklch(0.8 0.16 90 / 0.1)")
+                .style("border-left", "1.5px solid oklch(0.82 0.17 90)")
+                .style("border-right", "1.5px solid oklch(0.82 0.17 90)")
+                .style("box-sizing", "border-box")
+                .style("pointer-events", "none")
+                .style("z-index", "0")
+            })),
+            None => d,
+        })
         // Move/resize/trim/draw + scrub track on the container (so a drag can
         // cross lanes). Asset-drag ghost movement is handled globally below.
         .global_event(move |e: events::PointerMove| {
@@ -728,6 +747,7 @@ fn tbtn(label: &str, active: bool, title: &str, f: impl Fn() + 'static) -> Dom {
 fn toolbar(arr: &Arrangement, snap: Snap, tool: Tool) -> Dom {
     let bpm = arr.bpm;
     let len = arr.length_secs;
+    let markers = arr.has_markers().then(|| arr.range());
     let pick = |t: Tool| move || TOOL.with(|m| m.set(t));
     html!("div", {
         .style("display", "flex")
@@ -777,6 +797,22 @@ fn toolbar(arr: &Arrangement, snap: Snap, tool: Tool) -> Dom {
             .title("Add a track to the arrangement")
             .on_click(|| controller().dispatch(EditorCommand::EditArrange { op: ArrangeOp::AddTrack }))
             .render())
+        // Loop/export markers: set the in/out points at the playhead; when set,
+        // playback loops the region and Export renders exactly it.
+        .child(tdivider())
+        .child(tbtn("\u{27E6} in", false, "Set the loop/export START marker at the playhead", || controller().arrange_set_loop_in()))
+        .child(tbtn("out \u{27E7}", false, "Set the loop/export END marker at the playhead", || controller().arrange_set_loop_out()))
+        .apply(|d| match markers {
+            Some((s, e)) => d
+                .child(html!("span", {
+                    .style("font-size", "11px")
+                    .style("color", "var(--accent-bright)")
+                    .style("white-space", "nowrap")
+                    .text(&format!("loop {s:.1}\u{2013}{e:.1}s"))
+                }))
+                .child(tbtn("\u{2715}", true, "Clear the loop/export markers (whole timeline)", || controller().arrange_clear_loop())),
+            None => d,
+        })
         .child(html!("div", { .style("flex", "1") }))
         .child(tbtn(snap.label(), snap != Snap::Off, "Cycle snap: off → clip → beat → bar (clip = snap to clip edges; beat/bar also magnet to clips)", || {
             SNAP.with(|m| m.set(m.get().next()));

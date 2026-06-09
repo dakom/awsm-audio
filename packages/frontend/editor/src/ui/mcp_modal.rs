@@ -1,0 +1,218 @@
+//! The MCP connect surface: a top-bar button that reflects the remote link's
+//! [`status`](crate::remote::status), plus a connect modal (an editable origin +
+//! Connect). Mounted once in [`crate::ui`]; visible whenever [`OPEN`] is set.
+//!
+//! Disconnected → "MCP" opens the modal. Connecting → disabled spinner-ish label.
+//! Connected → "MCP ✓" disconnects on click. The origin pre-fills from
+//! [`remote::origin`](crate::remote::origin) (the `?mcp=` value or the baked
+//! [`default_origin`](crate::remote::default_origin)).
+
+use dominator::{clone, events, html, with_node, Dom};
+use futures_signals::map_ref;
+use futures_signals::signal::{Mutable, SignalExt};
+
+use crate::remote::{self, RemoteStatus};
+use crate::widgets::{Btn, BtnSize, BtnVariant};
+
+thread_local! {
+    /// Whether the connect modal is open. UI-only state, so it lives here rather
+    /// than on the controller.
+    static OPEN: Mutable<bool> = Mutable::new(false);
+}
+
+fn open_state() -> Mutable<bool> {
+    OPEN.with(|o| o.clone())
+}
+
+/// The top-bar MCP button (reactive to the link status) plus, when connected, an
+/// activity chip that pulses while the agent is working and reads "idle" when it's
+/// safe to edit / the result is ready to export.
+pub fn button() -> Dom {
+    html!("div", {
+        .style("display", "flex")
+        .style("align-items", "center")
+        .style("gap", "6px")
+        .child_signal(remote::status().signal().map(|status| Some(status_button(status))))
+        // The activity chip only exists while connected; it reflects `working`.
+        .child_signal(map_ref! {
+            let status = remote::status().signal(),
+            let working = remote::working().signal() =>
+            (*status == RemoteStatus::Connected).then(|| activity_chip(*working))
+        })
+    })
+}
+
+fn status_button(status: RemoteStatus) -> Dom {
+    match status {
+        RemoteStatus::Disconnected => Btn::new()
+            .label("MCP")
+            .variant(BtnVariant::Ghost)
+            .size(BtnSize::Sm)
+            .title("Connect to an MCP server")
+            .on_click(|| open_state().set(true))
+            .render(),
+        RemoteStatus::Connecting => Btn::new()
+            .label("MCP…")
+            .variant(BtnVariant::Ghost)
+            .size(BtnSize::Sm)
+            .title("Connecting…")
+            .disabled(true)
+            .on_click(|| {})
+            .render(),
+        RemoteStatus::Connected => Btn::new()
+            .label("MCP ✓")
+            .variant(BtnVariant::Primary)
+            .size(BtnSize::Sm)
+            .title("Connected — click to disconnect")
+            .on_click(remote::disconnect)
+            .render(),
+    }
+}
+
+/// The "🤖 agent working… / idle" chip. Pulses (via the `mcp-pulse` keyframes in
+/// [`crate::theme`]) while the agent is serving requests; calm + muted when idle.
+fn activity_chip(working: bool) -> Dom {
+    html!("div", {
+        .style("display", "inline-flex")
+        .style("align-items", "center")
+        .style("gap", "5px")
+        // Match the Sm MCP button's footprint exactly (height/font/radius).
+        .style("height", "26px")
+        .style("box-sizing", "border-box")
+        .style("padding", "0 11px")
+        .style("border-radius", "var(--r2)")
+        .style("border-style", "solid")
+        .style("border-width", "1px")
+        .style("font-size", "12.5px")
+        .style("font-weight", "550")
+        .style("white-space", "nowrap")
+        .style("user-select", "none")
+        .apply(|d| if working {
+            d.style("color", "var(--accent-bright)")
+                .style("background", "oklch(0.7 0.13 230 / 0.16)")
+                .style("border-color", "var(--accent-line)")
+                // Pulse the whole chip's opacity while work is in flight.
+                .style("animation", "mcp-pulse 1.1s ease-in-out infinite")
+                .attr("title", "Agent is working — changes are landing live; wait for idle before editing or exporting.")
+        } else {
+            d.style("color", "var(--text-3)")
+                .style("background", "transparent")
+                .style("border-color", "var(--line)")
+                .attr("title", "Agent idle — safe to edit / export.")
+        })
+        .child(html!("span", { .text("🤖") }))
+        .child(html!("span", { .text(if working { "working…" } else { "idle" }) }))
+    })
+}
+
+/// The connect modal overlay (mounted once; shown when [`OPEN`] is set).
+pub fn render() -> Dom {
+    html!("div", {
+        .child_signal(open_state().signal().map(|open| open.then(view)))
+    })
+}
+
+fn view() -> Dom {
+    // Seed the editable field from the remembered origin.
+    let value = Mutable::new(remote::origin().get_cloned());
+
+    let submit = clone!(value => move || {
+        let origin = value.get_cloned();
+        let origin = origin.trim().to_string();
+        if !origin.is_empty() {
+            remote::connect(origin);
+        }
+        open_state().set(false);
+    });
+
+    html!("div", {
+        .style("position", "fixed")
+        .style("inset", "0")
+        .style("z-index", "1000")
+        // Backdrop closes the modal.
+        .child(html!("div", {
+            .style("position", "absolute")
+            .style("inset", "0")
+            .style("background", "oklch(0 0 0 / 0.62)")
+            .style("backdrop-filter", "blur(2px)")
+            .style_unchecked("-webkit-backdrop-filter", "blur(2px)")
+            .event(|_: events::Click| open_state().set(false))
+        }))
+        // Centering layer (transparent to pointer events; the panel re-enables).
+        .child(html!("div", {
+            .style("position", "absolute")
+            .style("inset", "0")
+            .style("display", "flex")
+            .style("align-items", "center")
+            .style("justify-content", "center")
+            .style("pointer-events", "none")
+            .child(html!("div", {
+                .style("pointer-events", "auto")
+                .style("width", "440px")
+                .style("max-width", "calc(100vw - 40px)")
+                .style("padding", "22px 24px")
+                .style("border-radius", "12px")
+                .style("background", "var(--bg-2)")
+                .style("border", "1px solid var(--accent)")
+                .style("box-shadow", "0 24px 70px oklch(0 0 0 / 0.6)")
+                .child(html!("h2", {
+                    .style("margin", "0 0 6px")
+                    .style("font-size", "17px")
+                    .style("font-weight", "650")
+                    .text("Connect to MCP server")
+                }))
+                .child(html!("p", {
+                    .style("margin", "0 0 14px")
+                    .style("font-size", "13px")
+                    .style("line-height", "1.5")
+                    .style("color", "var(--text-2)")
+                    .text("The editor dials out to a local MCP server over \
+                           WebTransport. Start it with `task mcp:serve`, then \
+                           connect to its control origin.")
+                }))
+                .child(html!("input" => web_sys::HtmlInputElement, {
+                    .style("width", "100%")
+                    .style("box-sizing", "border-box")
+                    .style("padding", "8px 10px")
+                    .style("font-size", "13.5px")
+                    .style("border-radius", "8px")
+                    .style("border", "1px solid var(--line)")
+                    .style("background", "var(--bg-1)")
+                    .style("color", "var(--text-1)")
+                    .attr("type", "text")
+                    .attr("spellcheck", "false")
+                    .attr("placeholder", "http://127.0.0.1:9171")
+                    .attr("value", &value.get_cloned())
+                    .with_node!(input => {
+                        .event(clone!(value, input => move |_: events::Input| {
+                            value.set(input.value());
+                        }))
+                        .event(clone!(submit => move |e: events::KeyDown| {
+                            if e.key() == "Enter" {
+                                submit();
+                            }
+                        }))
+                    })
+                }))
+                .child(html!("div", {
+                    .style("display", "flex")
+                    .style("justify-content", "flex-end")
+                    .style("gap", "8px")
+                    .style("margin-top", "16px")
+                    .child(Btn::new()
+                        .label("Cancel")
+                        .variant(BtnVariant::Ghost)
+                        .size(BtnSize::Sm)
+                        .on_click(|| open_state().set(false))
+                        .render())
+                    .child(Btn::new()
+                        .label("Connect")
+                        .variant(BtnVariant::Primary)
+                        .size(BtnSize::Sm)
+                        .on_click(clone!(submit => submit))
+                        .render())
+                }))
+            }))
+        }))
+    })
+}

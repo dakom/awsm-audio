@@ -14,9 +14,14 @@ vars:
   # Ports — deliberately in the 91xx block so they never collide with the
   # awsm-renderer dev servers (which live in 9079–9085).
   PORT_EDITOR_DEV: 9170
+  PORT_MCP_HTTP_DEV: 9171 # TCP — rmcp /mcp + /control + /debug
+  PORT_MCP_QUIC_DEV: 9172 # UDP — WebTransport link the editor dials into
 
   # URLs — dev
   URL_DEV_EDITOR: "http://localhost:{{.PORT_EDITOR_DEV}}"
+
+  # The default MCP server origin the editor dials out to (always local).
+  URL_MCP_DEFAULT: "http://127.0.0.1:{{.PORT_MCP_HTTP_DEV}}"
 
   # URLs — production (GitHub Pages deploy targets)
   URL_PROD_EDITOR: "https://dakom.github.io/awsm-audio/editor/"

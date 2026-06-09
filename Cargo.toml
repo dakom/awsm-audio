@@ -3,9 +3,12 @@ members = [
     "packages/crates/schema",
     "packages/crates/player",
     "packages/crates/worklet",
+    "packages/crates/editor-protocol",
     "packages/frontend/editor",
+    "packages/mcp",
     "packages/worklets/bitcrusher",
     "packages/worklets/drive",
+    "packages/worklets/gain",
     "packages/worklets/ringmod",
 ]
 resolver = "2"
@@ -55,6 +58,7 @@ opt-level = 3
 awsm-audio-schema = { path = "packages/crates/schema", version = "0.1.0" }
 awsm-audio-player = { path = "packages/crates/player", version = "0.1.0" }
 awsm-audio-worklet = { path = "packages/crates/worklet", version = "0.1.0" }
+awsm-audio-editor-protocol = { path = "packages/crates/editor-protocol", version = "0.1.0" }
 
 # Error handling
 anyhow = "1.0.102"
@@ -84,6 +88,13 @@ console_error_panic_hook = "0.1.7"
 
 # Inline (base64) WASM module assets in saved projects
 base64 = "0.22"
+
+# Stable identifiers (UUIDs) shared across schema + editor protocol.
+uuid = { version = "1.11.0", features = ["v4", "serde", "js"] }
+
+# JSON Schema derivation for the MCP server's strongly-typed tool params. Optional
+# everywhere (only the native MCP crate enables it); wasm builds never pull it.
+schemars = { version = "1", default-features = false, features = ["derive"] }
 
 # Standard MIDI File (.mid) parsing for the song sequencer. `parallel` (rayon)
 # is disabled — it doesn't build on wasm32-unknown-unknown (no threads).

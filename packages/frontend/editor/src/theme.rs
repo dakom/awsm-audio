@@ -157,4 +157,18 @@ pub fn init() {
         .style("outline", "none")
         .style("box-shadow", "0 0 0 1.5px var(--bg-1), 0 0 0 3px var(--accent-line)")
     });
+
+    // `@keyframes` aren't a selector rule, so inject them as a raw <style>. Drives
+    // the "🤖 agent working…" MCP pulse (see `ui::mcp_modal`).
+    inject_keyframes("@keyframes mcp-pulse{0%,100%{opacity:1}50%{opacity:0.4}}");
+}
+
+/// Append a raw CSS rule (e.g. an `@keyframes` block) to the document head.
+fn inject_keyframes(css: &str) {
+    if let Some(doc) = web_sys::window().and_then(|w| w.document()) {
+        if let (Ok(style), Some(head)) = (doc.create_element("style"), doc.head()) {
+            style.set_text_content(Some(css));
+            let _ = head.append_child(&style);
+        }
+    }
 }

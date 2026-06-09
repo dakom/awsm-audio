@@ -11,6 +11,7 @@ mod controller;
 mod fields;
 mod fs;
 mod ports;
+mod remote;
 mod theme;
 mod ui;
 mod util;
@@ -43,6 +44,31 @@ fn main() {
     });
 
     dominator::append_dom(&dominator::body(), ui::render());
+
+    // Auto-attach to an MCP server when the page is loaded with
+    // `?mcp=<control-origin>` (e.g. `?mcp=http://127.0.0.1:9171`). Without the
+    // param the link stays idle until the user connects via the top-bar button.
+    if let Some(origin) = mcp_origin_from_query() {
+        remote::origin().set(origin.clone());
+        remote::connect(origin);
+    }
+}
+
+/// Parse the `mcp=<origin>` query parameter from the page URL, if present.
+fn mcp_origin_from_query() -> Option<String> {
+    let search = web_sys::window()?.location().search().ok()?;
+    let trimmed = search.strip_prefix('?').unwrap_or(&search);
+    trimmed.split('&').find_map(|pair| {
+        let (key, value) = pair.split_once('=')?;
+        if key != "mcp" {
+            return None;
+        }
+        let decoded = js_sys::decode_uri_component(value)
+            .ok()
+            .and_then(|s| s.as_string())
+            .unwrap_or_else(|| value.to_string());
+        (!decoded.is_empty()).then_some(decoded)
+    })
 }
 
 /// External-inspection seam: the serializable editor snapshot as TOML. This is
@@ -170,11 +196,11 @@ pub fn editor_waveform() -> Vec<u8> {
     controller::controller().audio_waveform()
 }
 
-/// Toggle the real-time WAV export: starts recording the live output (and Play);
-/// call again to stop an open-ended capture. What you hear is what you get.
+/// Export the active sample to a `.wav` (offline render — a Sound's bounce, or an
+/// Arrangement's clip timeline over its marked/whole window).
 #[wasm_bindgen]
 pub fn editor_export_wav() {
-    controller::controller().toggle_export();
+    controller::controller().export_active_wav();
 }
 
 /// Set the spatial listener position — the "player"-side control a runtime moves
