@@ -16,8 +16,10 @@ name = "awsm-audio-mcp-server"
 path = "src/main.rs"
 
 [dependencies]
-awsm-audio-editor-protocol = { workspace = true }
-awsm-audio-schema = { workspace = true }
+# `schemars` feature: derive JSON Schema on the protocol + schema types so tool
+# params can be strongly typed (and self-documenting) rather than raw JSON.
+awsm-audio-editor-protocol = { workspace = true, features = ["schemars"] }
+awsm-audio-schema = { workspace = true, features = ["schemars"] }
 
 tokio = { version = "1.47", features = ["full"] }
 anyhow = { workspace = true }

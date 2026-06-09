@@ -14,6 +14,7 @@ use crate::ids::{NodeId, SampleId};
 /// full sequencer-driven song — what it does is determined by its content and
 /// the typed port matrix, not a category). An **Arrangement** is the DAW
 /// timeline surface, whose data lives in [`Sample::arrangement`].
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SampleKind {
@@ -28,6 +29,7 @@ pub enum SampleKind {
 }
 
 /// A named, self-contained audio unit.
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Sample {
     pub id: SampleId,
@@ -77,6 +79,7 @@ impl Sample {
 /// nodes; note-off lets them run for `release` seconds (envelope tail) before
 /// stopping. Envelopes, velocity, and polyphony are layered on later via
 /// [`SampleParam`] automation — this captures the minimal gate behavior.
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct TriggerSpec {
     /// Source nodes (oscillators, buffer sources, …) started on note-on. Empty

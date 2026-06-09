@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 use awsm_audio_schema::{Arrangement, Graph, NodeId, SampleLibrary};
 
 /// World position of one node — the layout the schema deliberately omits.
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NodeLayout {
     pub id: NodeId,
@@ -19,6 +20,7 @@ pub struct NodeLayout {
 
 /// A complete, serializable view of the editor: the audio graph plus the
 /// view-state needed to reconstruct the canvas exactly.
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EditorSnapshot {
     pub graph: Graph,
@@ -41,6 +43,7 @@ fn one() -> f64 {
 /// assets the player consumes) plus editor-only extras (node layout + camera) so
 /// reopening restores the canvas exactly. A bare `SampleLibrary` (e.g. an
 /// example) also opens — it just gets auto-laid-out.
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EditorProject {
     pub library: SampleLibrary,

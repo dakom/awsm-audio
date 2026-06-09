@@ -12,10 +12,18 @@ repository.workspace = true
 serde = { workspace = true, features = ["derive"] }
 thiserror = { workspace = true }
 uuid = { workspace = true }
+# Optional: derive JSON Schema for the schema types so the native MCP server can
+# expose strongly-typed tool params. Off by default (wasm never pulls it).
+schemars = { workspace = true, optional = true }
 # Encodes the bundled example WASM module inline in the `crush` example.
 base64 = { workspace = true }
 # Standard MIDI File parsing for the Note Sequencer (and Control Sequencer CC import).
 midly = { workspace = true }
+
+[features]
+# Derive `schemars::JsonSchema` on the schema types (id newtypes get a hand-rolled
+# `"type":"string","format":"uuid"` schema instead of recursing into Uuid).
+schemars = ["dep:schemars"]
 
 [dev-dependencies]
 # Format-agnostic schema: TOML is only used to exercise round-tripping in tests.

@@ -19,6 +19,7 @@ use crate::field::FieldValue;
 use crate::node::{BoundaryPort, ConnId};
 
 /// Adjacently tagged (`cmd` + `args`) so it round-trips through TOML/JSON.
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "cmd", content = "args")]
 pub enum EditorCommand {
@@ -65,7 +66,11 @@ pub enum EditorCommand {
         to: NodeId,
     },
     /// Remove a single wire by its editor id.
-    Disconnect { id: ConnId },
+    Disconnect {
+        // `ConnId` is a bare `Uuid`; describe it as a uuid string for JSON Schema.
+        #[cfg_attr(feature = "schemars", schemars(with = "String"))]
+        id: ConnId,
+    },
     /// Edit a Note Sequencer node's song / sound outputs (see [`SongOp`]).
     EditSong { node: NodeId, op: SongOp },
     /// Edit a Control Sequencer node's lanes / breakpoints (see [`ControlOp`]).
@@ -131,6 +136,7 @@ pub enum EditorCommand {
 
 /// A clip plus the track it belongs on — the serde-friendly element of a
 /// multi-clip paste (a named struct, not a tuple, so it round-trips through TOML).
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PlacedClip {
     pub track: usize,
@@ -139,6 +145,7 @@ pub struct PlacedClip {
 
 /// A single edit to a Note Sequencer node. Sound outputs are auto-derived from
 /// the song (one per melodic track / per drum note) and addressed by index.
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "op", content = "args")]
 pub enum SongOp {
@@ -180,6 +187,7 @@ pub enum SongOp {
 
 /// A single edit to a Control Sequencer node. Lanes (and their breakpoints) are
 /// addressed by index; each lane is an output wired to a parameter.
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "op", content = "args")]
 pub enum ControlOp {
@@ -219,6 +227,7 @@ pub enum ControlOp {
 /// A single edit to the active Arrangement. Tracks and clips are addressed by
 /// index. Structural edits (add/remove/split/move) push undo; continuous drags
 /// (move/resize) are transient — the UI pushes one undo on drag start.
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "op", content = "args")]
 pub enum ArrangeOp {

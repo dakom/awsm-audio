@@ -51,6 +51,7 @@ pub fn can_connect(emit: Emit, accept: Accept) -> bool {
 }
 
 /// A directed edge from a signal source to a signal sink.
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Connection {
     pub from: ConnectionSource,
@@ -85,6 +86,7 @@ impl Connection {
 }
 
 /// The upstream end of a [`Connection`] — something that emits a signal.
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "from")]
 pub enum ConnectionSource {
@@ -104,6 +106,7 @@ pub enum ConnectionSource {
 }
 
 /// The downstream end of a [`Connection`] — something that receives a signal.
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "to")]
 pub enum ConnectionSink {

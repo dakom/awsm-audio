@@ -25,9 +25,9 @@ use rmcp::{
 };
 use serde_json::Value;
 
-use awsm_audio_editor_protocol::schema::{NodeId, SampleId};
+use awsm_audio_editor_protocol::schema::{NodeId, NodeKind, SampleId};
 use awsm_audio_editor_protocol::{
-    ArrangeOp, EditorCommand, EditorQuery, FieldValue, QueryResult, Request, Response,
+    ArrangeOp, EditorCommand, EditorQuery, FieldValue, Request, Response,
 };
 
 use crate::link::EditorLink;
@@ -46,29 +46,28 @@ pub struct EditorMcp {
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct SampleArg {
-    /// Target Sound/sample UUID (from `list_samples`). Omit to use the project
-    /// root.
+    /// Target Sound/sample id (from `list_samples`). Omit to use the project root.
     #[serde(default)]
-    pub sample: Option<String>,
+    pub sample: Option<SampleId>,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct SampleReq {
-    /// Target sample UUID (from `list_samples`).
-    pub sample: String,
+    /// Target sample id (from `list_samples`).
+    pub sample: SampleId,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct NodeArg {
-    /// Target node UUID (from `get_snapshot`'s `graph`/`layout` ids).
-    pub node: String,
+    /// Target node id (from `get_snapshot`).
+    pub node: NodeId,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct RenderWavParams {
     /// Sound to render. Omit to render the project root.
     #[serde(default)]
-    pub sample: Option<String>,
+    pub sample: Option<SampleId>,
     /// Override the bounce sample rate (Hz).
     #[serde(default)]
     pub sample_rate: Option<f32>,
@@ -78,32 +77,31 @@ pub struct RenderWavParams {
 pub struct WaveformParams {
     /// Sound to render. Omit to render the project root.
     #[serde(default)]
-    pub sample: Option<String>,
+    pub sample: Option<SampleId>,
     /// Number of min/max buckets (envelope columns) to return.
     pub buckets: u32,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct AddNodeParams {
-    /// The node kind. Easiest: a kind-name string from `list_node_kinds` (e.g.
-    /// `"oscillator"`, `"biquad_filter"`, `"gain"`) — the editor fills in WebAudio
-    /// defaults. Or a full value: `{"kind":"<tag>","props":{…}}` (copy a kind's
-    /// `example` from `list_node_kinds`). The editor mints the node id — read it
-    /// back from a follow-up `get_snapshot`.
-    pub kind: Value,
+    /// The node kind to create — a `NodeKind` value, adjacently tagged
+    /// (`{"kind":"<tag>","props":{…}}`). The param schema lists every kind and its
+    /// props; `list_node_kinds` gives a copy-paste `example` + docs per kind. The
+    /// editor mints the node id — read it back from a follow-up `get_snapshot`.
+    pub kind: Flexible<NodeKind>,
     pub x: f64,
     pub y: f64,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct ConnectParams {
-    /// Source node UUID.
-    pub from: String,
+    /// Source node id.
+    pub from: NodeId,
     /// Source output port index.
     #[serde(default)]
     pub from_output: u32,
-    /// Destination node UUID.
-    pub to: String,
+    /// Destination node id.
+    pub to: NodeId,
     /// Destination input port index.
     #[serde(default)]
     pub to_input: u32,
@@ -111,30 +109,32 @@ pub struct ConnectParams {
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct SetFieldParams {
-    /// Target node UUID.
-    pub node: String,
-    /// Field key (see the editor's `fields` reflection).
+    /// Target node id.
+    pub node: NodeId,
+    /// Field key (from `get_node_fields` / `list_node_kinds`).
     pub key: String,
-    /// Numeric value (most fields). For text/bool fields use `dispatch_command`.
+    /// Numeric value (most fields). For a text/bool field, use `dispatch_command`
+    /// with a `FieldValue`.
     pub value: f64,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
-pub struct CommandJsonParams {
-    /// A raw `EditorCommand` as JSON (internally tagged by `"cmd"`/`"args"`).
-    pub command: Value,
+pub struct CommandParams {
+    /// An `EditorCommand` (adjacently tagged by `"cmd"`/`"args"`). The param schema
+    /// documents every command variant and its args.
+    pub command: Flexible<EditorCommand>,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
-pub struct BatchJsonParams {
-    /// A list of raw `EditorCommand`s, applied in order in one round-trip.
-    pub commands: Vec<Value>,
+pub struct BatchParams {
+    /// `EditorCommand`s applied in order in one round-trip.
+    pub commands: Vec<Flexible<EditorCommand>>,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
-pub struct QueryJsonParams {
-    /// A raw `EditorQuery` as JSON (internally tagged by `"query"`/`"args"`).
-    pub query: Value,
+pub struct QueryParams {
+    /// An `EditorQuery` (adjacently tagged by `"query"`/`"args"`).
+    pub query: Flexible<EditorQuery>,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
@@ -150,9 +150,8 @@ pub struct MarkersParams {
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct AttachWasmParams {
-    /// AudioWorklet node id (UUID). Create one first with add_node(kind:
-    /// audio_worklet).
-    pub node: String,
+    /// AudioWorklet node id. Create one first with add_node (kind audio_worklet).
+    pub node: NodeId,
     /// Path to the compiled .wasm (e.g.
     /// target/wasm32-unknown-unknown/release/foo.wasm). The server reads + encodes
     /// it.
@@ -205,10 +204,7 @@ impl EditorMcp {
         &self,
         Parameters(p): Parameters<NodeArg>,
     ) -> Result<CallToolResult, McpError> {
-        self.query(EditorQuery::NodeFields {
-            node: parse_node(&p.node)?,
-        })
-        .await
+        self.query(EditorQuery::NodeFields { node: p.node }).await
     }
 
     #[tool(description = "List every sample (id, name, kind, root/active flags).")]
@@ -241,10 +237,8 @@ impl EditorMcp {
         &self,
         Parameters(p): Parameters<SampleReq>,
     ) -> Result<CallToolResult, McpError> {
-        self.query(EditorQuery::BounceStatus {
-            sample: parse_sample(&p.sample)?,
-        })
-        .await
+        self.query(EditorQuery::BounceStatus { sample: p.sample })
+            .await
     }
 
     // ── audio readback (the WAV surface) ─────────────────────────────────────
@@ -259,7 +253,7 @@ impl EditorMcp {
         Parameters(p): Parameters<RenderWavParams>,
     ) -> Result<CallToolResult, McpError> {
         let req = Request::RenderWav {
-            sample: parse_sample_opt(&p.sample)?,
+            sample: p.sample,
             sample_rate: p.sample_rate,
         };
         self.wav(req).await
@@ -272,10 +266,7 @@ impl EditorMcp {
         &self,
         Parameters(p): Parameters<SampleArg>,
     ) -> Result<CallToolResult, McpError> {
-        self.query(EditorQuery::WavStats {
-            sample: parse_sample_opt(&p.sample)?,
-        })
-        .await
+        self.query(EditorQuery::WavStats { sample: p.sample }).await
     }
 
     #[tool(
@@ -288,7 +279,7 @@ impl EditorMcp {
         Parameters(p): Parameters<WaveformParams>,
     ) -> Result<CallToolResult, McpError> {
         self.query(EditorQuery::Waveform {
-            sample: parse_sample_opt(&p.sample)?,
+            sample: p.sample,
             buckets: p.buckets,
         })
         .await
@@ -317,20 +308,16 @@ impl EditorMcp {
     // ── ergonomic typed mutators (common cases) ──────────────────────────────
 
     #[tool(
-        description = "Add a node at world (x, y). `kind` is a kind-name string \
-        from list_node_kinds (defaults filled in) or a full \
-        {\"kind\":…,\"props\":…} value. The editor mints the id; read it back with \
-        get_snapshot."
+        description = "Add a node of `kind` (a typed NodeKind — see the param \
+        schema, or copy a kind's `example` from list_node_kinds) at world (x, y). \
+        The editor mints the id; read it back with get_snapshot."
     )]
     async fn add_node(
         &self,
         Parameters(p): Parameters<AddNodeParams>,
     ) -> Result<CallToolResult, McpError> {
-        let kind_value = self.resolve_kind(p.kind).await?;
-        let kind = serde_json::from_value(kind_value)
-            .map_err(|e| McpError::invalid_params(format!("bad node kind: {e}"), None))?;
         self.dispatch(EditorCommand::AddNode {
-            kind,
+            kind: p.kind.0,
             x: p.x,
             y: p.y,
         })
@@ -342,10 +329,8 @@ impl EditorMcp {
         &self,
         Parameters(p): Parameters<NodeArg>,
     ) -> Result<CallToolResult, McpError> {
-        self.dispatch(EditorCommand::RemoveNode {
-            id: parse_node(&p.node)?,
-        })
-        .await
+        self.dispatch(EditorCommand::RemoveNode { id: p.node })
+            .await
     }
 
     #[tool(description = "Wire an output port to an input port.")]
@@ -354,9 +339,9 @@ impl EditorMcp {
         Parameters(p): Parameters<ConnectParams>,
     ) -> Result<CallToolResult, McpError> {
         self.dispatch(EditorCommand::Connect {
-            from: parse_node(&p.from)?,
+            from: p.from,
             from_output: p.from_output,
-            to: parse_node(&p.to)?,
+            to: p.to,
             to_input: p.to_input,
         })
         .await
@@ -368,7 +353,7 @@ impl EditorMcp {
         Parameters(p): Parameters<SetFieldParams>,
     ) -> Result<CallToolResult, McpError> {
         self.dispatch(EditorCommand::SetField {
-            id: parse_node(&p.node)?,
+            id: p.node,
             key: p.key,
             value: FieldValue::Num(p.value),
         })
@@ -383,10 +368,8 @@ impl EditorMcp {
         &self,
         Parameters(p): Parameters<SampleReq>,
     ) -> Result<CallToolResult, McpError> {
-        self.dispatch(EditorCommand::Bounce {
-            sample: parse_sample(&p.sample)?,
-        })
-        .await
+        self.dispatch(EditorCommand::Bounce { sample: p.sample })
+            .await
     }
 
     #[tool(
@@ -397,10 +380,7 @@ impl EditorMcp {
         &self,
         Parameters(p): Parameters<SampleReq>,
     ) -> Result<CallToolResult, McpError> {
-        self.dispatch(EditorCommand::SetRoot {
-            id: parse_sample(&p.sample)?,
-        })
-        .await
+        self.dispatch(EditorCommand::SetRoot { id: p.sample }).await
     }
 
     #[tool(
@@ -414,9 +394,7 @@ impl EditorMcp {
         Parameters(p): Parameters<SampleReq>,
     ) -> Result<CallToolResult, McpError> {
         match self
-            .req(Request::SetActiveSample {
-                sample: parse_sample(&p.sample)?,
-            })
+            .req(Request::SetActiveSample { sample: p.sample })
             .await?
         {
             Response::Ok => Ok(text("ok")),
@@ -457,7 +435,7 @@ impl EditorMcp {
         &self,
         Parameters(p): Parameters<AttachWasmParams>,
     ) -> Result<CallToolResult, McpError> {
-        let node = parse_node(&p.node)?;
+        let node = p.node;
         let wasm_base64 = match (p.wasm_base64, p.wasm_path) {
             (Some(b64), _) => b64,
             (None, Some(path)) => {
@@ -491,30 +469,23 @@ impl EditorMcp {
 
     // ── generic escape hatches ───────────────────────────────────────────────
 
-    #[tool(description = "Dispatch a raw EditorCommand (escape hatch for any \
-        command without a dedicated tool). `command` is internally tagged by \
-        \"cmd\"/\"args\" — match get_snapshot's shapes.")]
+    #[tool(description = "Dispatch any EditorCommand (escape hatch for commands \
+        without a dedicated tool — sequencer/arrangement edits, etc.). The param \
+        schema documents every command + its args.")]
     async fn dispatch_command(
         &self,
-        Parameters(p): Parameters<CommandJsonParams>,
+        Parameters(p): Parameters<CommandParams>,
     ) -> Result<CallToolResult, McpError> {
-        let cmd: EditorCommand = serde_json::from_value(p.command)
-            .map_err(|e| McpError::invalid_params(format!("bad command: {e}"), None))?;
-        self.dispatch(cmd).await
+        self.dispatch(p.command.0).await
     }
 
-    #[tool(description = "Dispatch a list of raw EditorCommands in order in one \
+    #[tool(description = "Dispatch a list of EditorCommands in order in one \
         round-trip (applied sequentially). Cuts latency for multi-step edits.")]
     async fn dispatch_batch(
         &self,
-        Parameters(p): Parameters<BatchJsonParams>,
+        Parameters(p): Parameters<BatchParams>,
     ) -> Result<CallToolResult, McpError> {
-        let cmds: Vec<EditorCommand> = p
-            .commands
-            .into_iter()
-            .map(serde_json::from_value)
-            .collect::<Result<_, _>>()
-            .map_err(|e| McpError::invalid_params(format!("bad command in batch: {e}"), None))?;
+        let cmds: Vec<EditorCommand> = p.commands.into_iter().map(|c| c.0).collect();
         match self.req(Request::DispatchBatch(cmds)).await? {
             Response::Ok => Ok(text("ok")),
             Response::Err(e) => Err(McpError::internal_error(e, None)),
@@ -522,16 +493,15 @@ impl EditorMcp {
         }
     }
 
-    #[tool(description = "Run a raw EditorQuery (escape hatch for any query \
-        without a dedicated tool). `query` is internally tagged by \
-        \"query\"/\"args\".")]
+    #[tool(
+        description = "Run any EditorQuery (escape hatch for queries without a \
+        dedicated tool). The param schema documents every query + its args."
+    )]
     async fn run_query(
         &self,
-        Parameters(p): Parameters<QueryJsonParams>,
+        Parameters(p): Parameters<QueryParams>,
     ) -> Result<CallToolResult, McpError> {
-        let q: EditorQuery = serde_json::from_value(p.query)
-            .map_err(|e| McpError::invalid_params(format!("bad query: {e}"), None))?;
-        self.query(q).await
+        self.query(p.query.0).await
     }
 }
 
@@ -551,35 +521,6 @@ impl EditorMcp {
             Response::Err(e) => Err(McpError::internal_error(e, None)),
             other => Err(unexpected(other)),
         }
-    }
-
-    /// Resolve an `add_node` `kind` argument: a bare kind-name string is looked up
-    /// in the catalog and replaced by its default value; an object is used as-is.
-    async fn resolve_kind(&self, kind: Value) -> Result<Value, McpError> {
-        let Some(tag) = kind.as_str() else {
-            return Ok(kind); // already a full {"kind":…,"props":…} value
-        };
-        let catalog = match self.req(Request::Query(EditorQuery::Catalog)).await? {
-            Response::Query(qr) => match *qr {
-                QueryResult::Catalog(v) => v,
-                other => {
-                    return Err(McpError::internal_error(
-                        format!("unexpected catalog result: {other:?}"),
-                        None,
-                    ));
-                }
-            },
-            Response::Err(e) => return Err(McpError::internal_error(e, None)),
-            other => return Err(unexpected(other)),
-        };
-        let info = catalog.into_iter().find(|i| i.kind == tag).ok_or_else(|| {
-            McpError::invalid_params(
-                format!("unknown node kind {tag:?}; call list_node_kinds for valid kinds"),
-                None,
-            )
-        })?;
-        serde_json::to_value(&info.example)
-            .map_err(|e| McpError::internal_error(e.to_string(), None))
     }
 
     async fn query(&self, q: EditorQuery) -> Result<CallToolResult, McpError> {
@@ -939,20 +880,37 @@ fn text(s: impl Into<String>) -> CallToolResult {
     CallToolResult::success(vec![Content::text(s.into())])
 }
 
-fn parse_node(s: &str) -> Result<NodeId, McpError> {
-    s.parse::<NodeId>()
-        .map_err(|e| McpError::invalid_params(format!("invalid node id {s:?}: {e}"), None))
-}
-
-fn parse_sample(s: &str) -> Result<SampleId, McpError> {
-    s.parse::<SampleId>()
-        .map_err(|e| McpError::invalid_params(format!("invalid sample id {s:?}: {e}"), None))
-}
-
-fn parse_sample_opt(s: &Option<String>) -> Result<Option<SampleId>, McpError> {
-    s.as_deref().map(parse_sample).transpose()
-}
-
 fn unexpected(resp: Response) -> McpError {
     McpError::internal_error(format!("unexpected response: {resp:?}"), None)
+}
+
+/// A tool argument that is **strongly typed** — its JSON Schema is exactly `T`'s,
+/// so a fresh agent sees the precise shape — yet tolerant of clients that deliver
+/// a nested object as a JSON *string* (it deserializes from either form). Typed,
+/// self-documenting, and robust.
+#[derive(Debug, Clone)]
+pub struct Flexible<T>(pub T);
+
+impl<'de, T: serde::de::DeserializeOwned> serde::Deserialize<'de> for Flexible<T> {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        use serde::de::Error;
+        let inner = match Value::deserialize(d)? {
+            Value::String(s) => serde_json::from_str(&s).map_err(Error::custom)?,
+            other => serde_json::from_value(other).map_err(Error::custom)?,
+        };
+        Ok(Flexible(inner))
+    }
+}
+
+// Schema is exactly `T`'s — clients that respect schemas send a structured object.
+impl<T: schemars::JsonSchema> schemars::JsonSchema for Flexible<T> {
+    fn schema_name() -> std::borrow::Cow<'static, str> {
+        T::schema_name()
+    }
+    fn schema_id() -> std::borrow::Cow<'static, str> {
+        T::schema_id()
+    }
+    fn json_schema(generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        T::json_schema(generator)
+    }
 }

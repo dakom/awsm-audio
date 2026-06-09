@@ -11,6 +11,7 @@ use awsm_audio_schema::{NodeId, SampleId};
 use crate::{EditorCommand, EditorQuery, QueryResult};
 
 /// Server → editor. What the editor should do / report.
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Request {
     /// Apply a mutation through `EditorController::dispatch`.
@@ -54,6 +55,7 @@ pub enum Request {
 
 /// Editor → server **push** event (unsolicited channel). One per uni stream.
 /// Relayed to the agent as an MCP logging notification.
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EditorEvent {
     /// `"toast"` | `"selection"` | `"transport"`.
@@ -69,6 +71,7 @@ pub struct EditorEvent {
 }
 
 /// Editor → server. The reply to a [`Request`].
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Response {
     /// A mutation / control op succeeded with no payload.

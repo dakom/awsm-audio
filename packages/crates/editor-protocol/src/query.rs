@@ -11,6 +11,7 @@ use crate::snapshot::{EditorProject, EditorSnapshot};
 
 /// A serde-tagged query an MCP/WebTransport transport (or a headless driver)
 /// sends to inspect editor state; the controller answers with a [`QueryResult`].
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "query", content = "args")]
 pub enum EditorQuery {
@@ -52,6 +53,7 @@ pub enum EditorQuery {
 
 /// The answer to an [`EditorQuery`]. Serialized back to the caller; also
 /// `Deserialize` so the native MCP server can decode it off the wire.
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "result", content = "data")]
 pub enum QueryResult {
@@ -71,6 +73,7 @@ pub enum QueryResult {
 /// One editable setting of a node — the keys/ranges `set_field` accepts. Mirrors
 /// the editor's `fields` reflection so an agent can edit a node without knowing
 /// its schema.
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FieldInfo {
     /// The `set_field` key.
@@ -95,6 +98,7 @@ pub struct FieldInfo {
 /// A creatable node kind, surfaced for discovery so an agent can `add_node`
 /// without knowing the schema. Pass `kind` (the tag string) or `example` (the
 /// full default value) to `add_node`.
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NodeKindInfo {
     /// The serde tag — e.g. `"oscillator"`, `"biquad_filter"`. Pass this string to
@@ -104,6 +108,13 @@ pub struct NodeKindInfo {
     pub label: String,
     /// Palette section (`"Sources"`, `"Effects"`, `"Sequencing"`, …).
     pub section: String,
+    /// One-paragraph plain-language description of what this node does and when to
+    /// reach for it (the editor's node-help text).
+    pub description: String,
+    /// MDN reference page for the underlying WebAudio interface (empty for the
+    /// sequencer/composite kinds that have no direct WebAudio node).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub mdn: String,
     /// A ready-to-use default value — the exact JSON `add_node`'s `kind` accepts,
     /// e.g. `{"kind":"oscillator","props":{…}}`.
     pub example: NodeKind,
@@ -111,6 +122,7 @@ pub struct NodeKindInfo {
     pub fields: Vec<FieldInfo>,
 }
 
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SampleInfo {
     pub id: SampleId,
@@ -120,6 +132,7 @@ pub struct SampleInfo {
     pub is_active: bool,
 }
 
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AssetInfo {
     pub id: SampleId,
@@ -129,6 +142,7 @@ pub struct AssetInfo {
     pub duration_secs: Option<f64>,
 }
 
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TransportInfo {
     pub playing: bool,
@@ -138,6 +152,7 @@ pub struct TransportInfo {
 }
 
 /// Cheap numeric stats of a Sound's offline render.
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WavStats {
     pub duration_secs: f64,
@@ -184,6 +199,7 @@ impl WavStats {
 }
 
 /// Per-bucket min/max of a mono-summed render, normalized to [-1, 1].
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WaveformEnvelope {
     pub sample_rate: u32,

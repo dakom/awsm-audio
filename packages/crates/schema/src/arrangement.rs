@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 use crate::ids::{AssetId, SampleId};
 
 /// A whole arrangement: a tempo (for the grid), a length in seconds, and tracks.
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Arrangement {
     /// Tempo in BPM — used only to draw the bar/beat grid and snap edits.
@@ -66,6 +67,7 @@ impl Arrangement {
 }
 
 /// One horizontal lane of audio clips.
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ArrTrack {
     /// Display name (e.g. "Bass", "Drums").
@@ -100,6 +102,7 @@ impl Default for ArrTrack {
 /// waveform and audio come from `source`'s [`Bounce`](crate::Bounce); an un-bounced
 /// source can't play. Blade/trim produce clips that share a source with different
 /// `offset` / `length`.
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Clip {
     /// Start position on the timeline, in seconds.
@@ -152,6 +155,7 @@ fn is_one(v: &f32) -> bool {
 /// A sample's rendered audio: the buffer asset it bounced to, plus a hash of the
 /// source graph at bounce time so the editor can flag the bounce as **dirty** when
 /// the Sound is edited afterward.
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Bounce {
     /// The rendered [`BufferAsset`](crate::BufferAsset) id.

@@ -15,6 +15,7 @@ use crate::sample::Sample;
 pub const SCHEMA_VERSION: u32 = 1;
 
 /// A complete authored audio document.
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SampleLibrary {
     #[serde(default = "default_version")]
@@ -59,6 +60,7 @@ fn default_version() -> u32 {
 
 /// The single per-context `AudioListener`, modeled as automatable params so it
 /// can move over time alongside the [`PannerNode`](crate::PannerNode)s.
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Listener {
     pub position_x: AudioParam,

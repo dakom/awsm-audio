@@ -154,6 +154,8 @@ fn catalog_and_node_fields_round_trip() {
         kind: "oscillator".into(),
         label: "Oscillator".into(),
         section: "Sources".into(),
+        description: "A periodic tone generator.".into(),
+        mdn: "https://developer.mozilla.org/en-US/docs/Web/API/OscillatorNode".into(),
         example: NodeKind::Gain(Default::default()),
         fields: vec![
             FieldInfo {

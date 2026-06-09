@@ -8,6 +8,7 @@
 use serde::{Deserialize, Serialize};
 
 /// A single editable value flowing through the `SetField` command.
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "t", content = "v")]
 pub enum FieldValue {

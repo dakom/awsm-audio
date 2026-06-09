@@ -5,6 +5,7 @@
 use serde::{Deserialize, Serialize};
 
 /// `OscillatorNode.type`.
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum OscillatorType {
@@ -19,6 +20,7 @@ pub enum OscillatorType {
 }
 
 /// `BiquadFilterNode.type`.
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum BiquadFilterType {
@@ -34,6 +36,7 @@ pub enum BiquadFilterType {
 }
 
 /// `WaveShaperNode.oversample`.
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum OverSampleType {
     #[default]
@@ -47,6 +50,7 @@ pub enum OverSampleType {
 
 /// The distortion character of a [`WaveShaperNode`](crate::WaveShaperNode). The
 /// player generates the shaping curve from this + `amount` (the intensity).
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum WaveShaperShape {
@@ -63,6 +67,7 @@ pub enum WaveShaperShape {
 }
 
 /// `PannerNode.panningModel`.
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub enum PanningModelType {
     #[default]
@@ -73,6 +78,7 @@ pub enum PanningModelType {
 }
 
 /// `PannerNode.distanceModel`.
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum DistanceModelType {
@@ -83,6 +89,7 @@ pub enum DistanceModelType {
 }
 
 /// `AudioNode.channelCountMode`.
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum ChannelCountMode {
@@ -93,6 +100,7 @@ pub enum ChannelCountMode {
 }
 
 /// `AudioNode.channelInterpretation`.
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum ChannelInterpretation {
@@ -103,6 +111,7 @@ pub enum ChannelInterpretation {
 
 /// Spectral/character flavor of a [`NoiseNode`](crate::NoiseNode). Not a
 /// WebAudio enum — these select how the player synthesizes the noise buffer.
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum NoiseFlavor {
@@ -124,6 +133,7 @@ pub enum NoiseFlavor {
 }
 
 /// `AudioParam.automationRate`.
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AutomationRate {
     #[serde(rename = "a-rate")]

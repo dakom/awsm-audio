@@ -42,6 +42,19 @@ macro_rules! uuid_id {
                 Ok(Self(s.parse()?))
             }
         }
+
+        // On the wire a uuid id is a UUID string; describe it as such for JSON
+        // Schema (the MCP server's typed tool params) rather than recursing into
+        // Uuid (which would need schemars' uuid1 feature).
+        #[cfg(feature = "schemars")]
+        impl schemars::JsonSchema for $name {
+            fn schema_name() -> std::borrow::Cow<'static, str> {
+                stringify!($name).into()
+            }
+            fn json_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+                schemars::json_schema!({ "type": "string", "format": "uuid" })
+            }
+        }
     };
 }
 
@@ -77,6 +90,17 @@ macro_rules! name_id {
         impl std::fmt::Display for $name {
             fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
                 f.write_str(&self.0)
+            }
+        }
+
+        // Author-chosen name id: a plain string on the wire.
+        #[cfg(feature = "schemars")]
+        impl schemars::JsonSchema for $name {
+            fn schema_name() -> std::borrow::Cow<'static, str> {
+                stringify!($name).into()
+            }
+            fn json_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+                schemars::json_schema!({ "type": "string" })
             }
         }
     };

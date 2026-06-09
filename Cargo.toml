@@ -92,6 +92,10 @@ base64 = "0.22"
 # Stable identifiers (UUIDs) shared across schema + editor protocol.
 uuid = { version = "1.11.0", features = ["v4", "serde", "js"] }
 
+# JSON Schema derivation for the MCP server's strongly-typed tool params. Optional
+# everywhere (only the native MCP crate enables it); wasm builds never pull it.
+schemars = { version = "1", default-features = false, features = ["derive"] }
+
 # Standard MIDI File (.mid) parsing for the song sequencer. `parallel` (rayon)
 # is disabled — it doesn't build on wasm32-unknown-unknown (no threads).
 midly = { version = "0.5", default-features = false, features = ["std"] }

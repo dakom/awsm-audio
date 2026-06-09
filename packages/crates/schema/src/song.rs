@@ -10,6 +10,7 @@
 use serde::{Deserialize, Serialize};
 
 /// One note: a pitch + velocity placed on the timeline, with a duration.
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct NoteEvent {
     /// Start time, in beats (quarter notes) from the song's beginning.
@@ -27,6 +28,7 @@ pub struct NoteEvent {
 
 /// A stream of notes — usually one MIDI track / channel. Played polyphonically
 /// by whichever instrument a [`Part`](crate::Part) binds it to.
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Track {
     /// Display name (e.g. the SMF track name, or "Piano").
@@ -52,6 +54,7 @@ impl Track {
 }
 
 /// A tempo change at a beat position (an entry in a [`Song`]'s tempo map).
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TempoChange {
     /// Beat position the new tempo takes effect (0 = song start).
@@ -61,6 +64,7 @@ pub struct TempoChange {
 }
 
 /// A tempo and a set of note tracks.
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Song {
     /// Base tempo in beats per minute (the tempo before any [`tempo_map`] change,

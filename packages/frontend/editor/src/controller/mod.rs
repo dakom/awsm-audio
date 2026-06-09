@@ -1347,6 +1347,7 @@ impl EditorController {
                             })
                             .unwrap_or_default();
                         let label = crate::ports::kind_label(&kind).to_string();
+                        let help = crate::catalog::doc(&kind);
                         let fields = crate::fields::fields(&kind)
                             .iter()
                             .map(field_info)
@@ -1355,6 +1356,8 @@ impl EditorController {
                             kind: tag,
                             label,
                             section: section_name.clone(),
+                            description: help.body.to_string(),
+                            mdn: help.mdn.to_string(),
                             example: kind,
                             fields,
                         });

@@ -143,6 +143,7 @@ name = "awsm-audio-editor-protocol"
 version = "0.1.0"
 dependencies = [
  "awsm-audio-schema",
+ "schemars",
  "serde",
  "serde_json",
  "toml",
@@ -194,6 +195,7 @@ version = "0.1.0"
 dependencies = [
  "base64",
  "midly",
+ "schemars",
  "serde",
  "thiserror 2.0.18",
  "toml",

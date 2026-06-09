@@ -15,6 +15,7 @@ use crate::ids::{AssetId, PortId, SampleId};
 use crate::param::{AudioParam, ParamId};
 
 /// A node instance in a [`Graph`](crate::Graph).
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Node {
     pub id: crate::ids::NodeId,
@@ -36,6 +37,7 @@ impl Node {
 
 /// The discriminated set of node types: every primitive WebAudio node, plus
 /// [`Sample`](NodeKind::Sample) for nesting another sample as a sub-graph.
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "kind", content = "props")]
 pub enum NodeKind {
@@ -165,6 +167,7 @@ impl NodeKind {
 /// `OscillatorNode`. When `oscillator_type` is
 /// [`Custom`](OscillatorType::Custom), `harmonics` gives the amplitude of each
 /// partial (harmonic 1, 2, 3, …); the player builds a `PeriodicWave` from them.
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct OscillatorNode {
     // Scalars first (TOML: scalar keys must precede sub-tables).
@@ -189,6 +192,7 @@ impl Default for OscillatorNode {
 }
 
 /// `AudioBufferSourceNode`.
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AudioBufferSourceNode {
     // Scalars first (TOML: scalar keys must precede sub-tables).
@@ -221,6 +225,7 @@ impl Default for AudioBufferSourceNode {
 /// generates a seeded buffer per [`NoiseFlavor`] and loops it through an
 /// `AudioBufferSourceNode`. The recipe (not the samples) is what's stored, so
 /// it's tiny and reproducible.
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct NoiseNode {
     pub flavor: NoiseFlavor,
@@ -253,6 +258,7 @@ impl Default for NoiseNode {
 }
 
 /// `ConstantSourceNode` — a steady DC offset, handy as a control source.
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ConstantSourceNode {
     pub offset: AudioParam,
@@ -268,6 +274,7 @@ impl Default for ConstantSourceNode {
 
 /// `MediaElementAudioSourceNode` — pulls audio from an `<audio>`/`<video>`
 /// element. Referenced here by media URL; the player owns the element.
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct MediaElementSourceNode {
     pub src: String,
@@ -276,6 +283,7 @@ pub struct MediaElementSourceNode {
 /// `MediaStreamAudioSourceNode` — pulls from a live `MediaStream` (mic, etc.).
 /// The stream is bound at runtime; `label` is just an authoring hint for which
 /// device/role the editor should request.
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct MediaStreamSourceNode {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -287,6 +295,7 @@ pub struct MediaStreamSourceNode {
 // ======================================================================
 
 /// `GainNode`.
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct GainNode {
     pub gain: AudioParam,
@@ -301,6 +310,7 @@ impl Default for GainNode {
 }
 
 /// `BiquadFilterNode`.
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct BiquadFilterNode {
     #[serde(rename = "type")]
@@ -326,6 +336,7 @@ impl Default for BiquadFilterNode {
 
 /// `IIRFilterNode` — fixed feedforward/feedback coefficients, no automatable
 /// params.
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct IirFilterNode {
     pub feedforward: Vec<f64>,
@@ -344,6 +355,7 @@ impl Default for IirFilterNode {
 }
 
 /// `DelayNode`. `max_delay_time` is a construction-time ceiling.
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DelayNode {
     // Scalar first (TOML: scalar keys must precede sub-tables).
@@ -361,6 +373,7 @@ impl Default for DelayNode {
 }
 
 /// `DynamicsCompressorNode`.
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DynamicsCompressorNode {
     pub threshold: AudioParam,
@@ -384,6 +397,7 @@ impl Default for DynamicsCompressorNode {
 
 /// `WaveShaperNode` — distortion. The player generates the shaping curve from
 /// `shape` (the character) and `amount` (the intensity: 0 ≈ gentle).
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct WaveShaperNode {
     #[serde(default)]
@@ -411,6 +425,7 @@ impl Default for WaveShaperNode {
 }
 
 /// `ConvolverNode` — convolution reverb from an impulse-response `buffer`.
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ConvolverNode {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -444,6 +459,7 @@ impl Default for ConvolverNode {
 
 /// `PannerNode` — full 3D positional audio (paired with the context
 /// [`Listener`](crate::Listener)).
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PannerNode {
     pub panning_model: PanningModelType,
@@ -484,6 +500,7 @@ impl Default for PannerNode {
 }
 
 /// `StereoPannerNode` — simple equal-power L/R pan in `[-1, 1]`.
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct StereoPannerNode {
     pub pan: AudioParam,
@@ -503,6 +520,7 @@ impl Default for StereoPannerNode {
 
 /// `AnalyserNode` — passes audio through unchanged while exposing FFT/time
 /// data. Analysis is a runtime read; only its config is authored.
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AnalyserNode {
     pub fft_size: u32,
@@ -528,6 +546,7 @@ impl Default for AnalyserNode {
 
 /// `ChannelSplitterNode` — fans one input out to `number_of_outputs` mono
 /// outputs.
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ChannelSplitterNode {
     pub number_of_outputs: u32,
@@ -543,6 +562,7 @@ impl Default for ChannelSplitterNode {
 
 /// `ChannelMergerNode` — combines `number_of_inputs` mono inputs into one
 /// multi-channel output.
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ChannelMergerNode {
     pub number_of_inputs: u32,
@@ -570,6 +590,7 @@ impl Default for ChannelMergerNode {
 /// mapped onto the shim's fixed bank of generic `AudioParam`s — so a worklet's
 /// params behave like any other node's: editable, automatable (envelopes), and
 /// modulation-wire targets.
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct AudioWorkletNode {
     /// The WASM module providing the DSP, referenced by id. `None` = a silent
@@ -587,6 +608,7 @@ pub struct AudioWorkletNode {
 
 /// A parameter discovered from an [`AudioWorkletNode`]'s WASM module: a name and
 /// display range plus its automatable [`AudioParam`] state.
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct WorkletParam {
     pub name: ParamId,
@@ -602,6 +624,7 @@ pub struct WorkletParam {
 
 /// The graph's audible output (a plain stereo sink). Whatever feeds it reaches
 /// the speakers, scaled by `gain`.
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct OutputNode {
     pub gain: AudioParam,
@@ -619,6 +642,7 @@ impl Default for OutputNode {
 /// [`PannerNode`](PannerNode) at `position_*`. The position is the natural
 /// "player-adjustable" control: a runtime/game can move the sound by writing
 /// these params without touching the rest of the graph.
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SpatialOutputNode {
     pub gain: AudioParam,
@@ -645,6 +669,7 @@ impl Default for SpatialOutputNode {
 /// A reference instantiating another [`Sample`](crate::Sample) as a sub-graph.
 /// The referenced sample's inlets/outlets become this node's numbered
 /// inputs/outputs (in declaration order); each inlet's value can be set here.
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SampleRef {
     pub sample: SampleId,
@@ -657,6 +682,7 @@ pub struct SampleRef {
 
 /// Sets one inlet (input) of a referenced sample to a fixed value for this
 /// instance. (`port` is the referenced sample's inlet name.)
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct InputValue {
     pub port: PortId,
@@ -675,6 +701,7 @@ use crate::song::Song;
 /// whole-node property — every track in the node is the same kind — so the
 /// editor presents the two modes as two distinct palette nodes (a "Melodic
 /// Sequencer" and a "Drum Sequencer").
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SequencerMode {
@@ -698,6 +725,7 @@ impl SequencerMode {
 /// one output per distinct note (each its own kit piece). Wire each output to an
 /// instrument; the scheduler spawns a voice of it per note. `start` seeks
 /// (beats); `looping` repeats.
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct NoteSequencerNode {
     /// Melodic vs drum — fixed for the node; all its tracks follow it.
@@ -727,6 +755,7 @@ pub struct NoteSequencerNode {
 
 /// One sounding output of a [`NoteSequencerNode`] — a melodic track or a single
 /// drum note — wired (by `key`) to an instrument.
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SoundOut {
     /// Stable identity used by wires (e.g. `"t0"` or `"t2:n36"`).
@@ -747,6 +776,7 @@ pub struct SoundOut {
 
 /// Automates parameters over time: each [`ControlLane`] is a keyed output wired
 /// to a node param. The scheduler applies each lane as timed automation.
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ControlSequencerNode {
     /// Tempo (BPM) for the lanes' beat positions.
@@ -771,6 +801,7 @@ impl Default for ControlSequencerNode {
 }
 
 /// One automation lane: a value-over-time curve (in beats) = one keyed output.
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ControlLane {
     pub key: SeqKey,
@@ -781,6 +812,7 @@ pub struct ControlLane {
 }
 
 /// How a control lane segment reaches a point from the previous one.
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Curve {
@@ -797,6 +829,7 @@ pub enum Curve {
 
 /// A breakpoint in a [`ControlLane`]: `value` at `beat`, with the `curve`
 /// describing how the lane reaches it from the previous point.
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ControlPoint {
     pub beat: f64,
@@ -810,6 +843,7 @@ fn is_default_curve(c: &Curve) -> bool {
 }
 
 /// A summing bus — a named unity gain (any WebAudio node sums its inputs).
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct BusNode {
     /// Output level (linear); 1.0 = unity.

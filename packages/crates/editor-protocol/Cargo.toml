@@ -12,6 +12,12 @@ repository.workspace = true
 awsm-audio-schema = { workspace = true }
 serde = { workspace = true }
 uuid = { workspace = true } # ConnId = Uuid
+# Optional: derive JSON Schema for the command/query vocabulary so the native MCP
+# server can expose strongly-typed, self-documenting tool params.
+schemars = { workspace = true, optional = true }
+
+[features]
+schemars = ["dep:schemars", "awsm-audio-schema/schemars"]
 
 [dev-dependencies]
 serde_json = { workspace = true }
