@@ -260,6 +260,25 @@ fn arrange_paste_clip_round_trip() {
     json_round_trip(&cmd);
 }
 
+/// The loop/export markers op round-trips (set + clear).
+#[test]
+fn arrange_set_markers_round_trip() {
+    for op in [
+        ArrangeOp::SetMarkers {
+            start: Some(2.0),
+            end: Some(8.5),
+        },
+        ArrangeOp::SetMarkers {
+            start: None,
+            end: None,
+        },
+    ] {
+        let cmd = EditorCommand::EditArrange { op };
+        json_round_trip(&cmd);
+        toml_round_trip(&cmd);
+    }
+}
+
 // ── pure WAV-math helpers (the unattended coverage for the readback numbers) ──
 
 fn sine(freq: f32, secs: f32, rate: u32) -> Vec<Vec<f32>> {

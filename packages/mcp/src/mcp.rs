@@ -27,7 +27,7 @@ use serde_json::Value;
 
 use awsm_audio_editor_protocol::schema::{NodeId, SampleId};
 use awsm_audio_editor_protocol::{
-    EditorCommand, EditorQuery, FieldValue, QueryResult, Request, Response,
+    ArrangeOp, EditorCommand, EditorQuery, FieldValue, QueryResult, Request, Response,
 };
 
 use crate::link::EditorLink;
@@ -135,6 +135,17 @@ pub struct BatchJsonParams {
 pub struct QueryJsonParams {
     /// A raw `EditorQuery` as JSON (internally tagged by `"query"`/`"args"`).
     pub query: Value,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct MarkersParams {
+    /// Loop/export start marker (seconds). Omit BOTH start and end to clear the
+    /// markers (loop + export span the whole timeline).
+    #[serde(default)]
+    pub start: Option<f64>,
+    /// Loop/export end marker (seconds). Must be > start to take effect.
+    #[serde(default)]
+    pub end: Option<f64>,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
@@ -412,6 +423,25 @@ impl EditorMcp {
             Response::Err(e) => Err(McpError::internal_error(e, None)),
             other => Err(unexpected(other)),
         }
+    }
+
+    #[tool(
+        description = "Set or clear the active Arrangement's loop/export markers \
+        (seconds). When both are set (end > start), playback loops that region and \
+        export (render_wav on the arrangement) renders exactly it; omit both to \
+        clear. Switch to the arrangement with set_active_sample first."
+    )]
+    async fn set_arrangement_markers(
+        &self,
+        Parameters(p): Parameters<MarkersParams>,
+    ) -> Result<CallToolResult, McpError> {
+        self.dispatch(EditorCommand::EditArrange {
+            op: ArrangeOp::SetMarkers {
+                start: p.start,
+                end: p.end,
+            },
+        })
+        .await
     }
 
     // ── worklet authoring ────────────────────────────────────────────────────
@@ -799,7 +829,10 @@ Adjacently tagged by `query`/`args`. Unit variants need no args:
    output auditions to master.
 3. set_field to shape it; render_wav / wav_stats / waveform to inspect.
 4. bounce a Sound, then build an Arrangement (add_sample arrangement →
-   edit_arrange add_track / add_clip).
+   edit_arrange add_track / add_clip). render_wav / wav_stats / waveform work on
+   an arrangement sample too — they render its clip timeline. Optionally set
+   loop/export markers (set_arrangement_markers, or edit_arrange set_markers) to
+   render just a region; clear them to render the whole timeline.
 
 ## Multi-sample: an instrument played by a sequencer
 

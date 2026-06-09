@@ -297,10 +297,12 @@ fn tabs() -> Vec<Tab> {
                 (
                     "Export to WAV",
                     vec![
-                        "Export records the live output in real time, so it sounds \
-                         exactly like Play. Click Export to start (it begins playing \
-                         + recording), then click “■ Stop & save” to finish and \
-                         download the .wav.",
+                        "The ⤓ Export button renders the active sample offline and \
+                         downloads a .wav. A Sound exports its full patch; an \
+                         Arrangement renders its clip timeline — the whole thing, or \
+                         just the marked region when loop/export markers are set on \
+                         the ruler. Offline render is faster than realtime and \
+                         deterministic.",
                     ],
                 ),
                 (

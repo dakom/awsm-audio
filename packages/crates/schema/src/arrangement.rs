@@ -18,6 +18,15 @@ pub struct Arrangement {
     pub bpm: f64,
     /// Timeline length in seconds (the ruler extent).
     pub length_secs: f64,
+    /// Optional loop/export start marker, in seconds. When both markers are set
+    /// (and `end > start`), playback loops this region and export renders exactly
+    /// it; otherwise both span the whole timeline (`0..length_secs`). Toggled on
+    /// and off from the Arrange-view ruler.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub loop_start: Option<f64>,
+    /// Optional loop/export end marker, in seconds. See [`loop_start`](Self::loop_start).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub loop_end: Option<f64>,
     /// The tracks, top to bottom.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tracks: Vec<ArrTrack>,
@@ -28,6 +37,8 @@ impl Default for Arrangement {
         Self {
             bpm: 120.0,
             length_secs: 32.0,
+            loop_start: None,
+            loop_end: None,
             tracks: Vec::new(),
         }
     }
@@ -37,6 +48,20 @@ impl Arrangement {
     /// An arrangement is "empty" (and skipped on save) when it has no tracks.
     pub fn is_empty(&self) -> bool {
         self.tracks.is_empty()
+    }
+
+    /// Whether explicit loop/export markers are active (both set, `end > start`).
+    pub fn has_markers(&self) -> bool {
+        matches!((self.loop_start, self.loop_end), (Some(s), Some(e)) if e > s)
+    }
+
+    /// The effective `(start, end)` window in seconds for playback-loop and
+    /// export: the markers when active, else the whole timeline `(0, length_secs)`.
+    pub fn range(&self) -> (f64, f64) {
+        match (self.loop_start, self.loop_end) {
+            (Some(s), Some(e)) if e > s => (s.max(0.0), e),
+            _ => (0.0, self.length_secs),
+        }
     }
 }
 

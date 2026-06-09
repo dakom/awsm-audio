@@ -225,6 +225,15 @@ pub enum ArrangeOp {
     SetBpm(f64),
     /// Timeline length in seconds.
     SetLengthSecs(f64),
+    /// Set or clear the loop/export markers (seconds). Both `None` clears them
+    /// (loop + export span the whole timeline). With both set and `end > start`,
+    /// playback loops the region and export renders exactly it.
+    SetMarkers {
+        #[serde(default)]
+        start: Option<f64>,
+        #[serde(default)]
+        end: Option<f64>,
+    },
     AddTrack,
     RemoveTrack {
         track: usize,

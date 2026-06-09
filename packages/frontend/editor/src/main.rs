@@ -196,11 +196,11 @@ pub fn editor_waveform() -> Vec<u8> {
     controller::controller().audio_waveform()
 }
 
-/// Toggle the real-time WAV export: starts recording the live output (and Play);
-/// call again to stop an open-ended capture. What you hear is what you get.
+/// Export the active sample to a `.wav` (offline render — a Sound's bounce, or an
+/// Arrangement's clip timeline over its marked/whole window).
 #[wasm_bindgen]
 pub fn editor_export_wav() {
-    controller::controller().toggle_export();
+    controller::controller().export_active_wav();
 }
 
 /// Set the spatial listener position — the "player"-side control a runtime moves
