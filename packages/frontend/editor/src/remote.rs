@@ -3,8 +3,8 @@
 //! [`EditorController`](crate::controller) directly.
 //!
 //! Started two ways: automatically when the page is loaded with
-//! `?mcp=<control-origin>` (e.g. `?mcp=http://127.0.0.1:9171`, optionally
-//! `&pair=<code>`), or on demand via the top-bar MCP button → connect modal
+//! `?mcp=<host:port>` (e.g. `?mcp=127.0.0.1:9171`, optionally `&pair=<code>` and
+//! `&tls=true` for a TLS server), or on demand via the top-bar MCP button → modal
 //! (pre-filled with [`default_origin`], or the `?mcp=` origin, plus an optional
 //! pairing code). Connect / disconnect surface as status toasts and a reactive
 //! [`status`] signal the UI reflects.
@@ -42,12 +42,14 @@ use crate::controller::controller;
 /// writer in [`run`].
 type LinkTx = mpsc::UnboundedSender<WsClientMsg>;
 
-/// The MCP server's control origin the connect modal pre-fills when no `?mcp=`
-/// param was supplied. Baked from `MCP_DEFAULT_ORIGIN` at build time (sourced from
-/// `taskfiles/config.yml` → `URL_MCP_DEFAULT`), falling back to the loopback dev
-/// default. The server is always local, so this is the same in dev and prod.
+/// The MCP server's control authority (`host:port`, no scheme) the connect modal
+/// pre-fills when no `?mcp=` param was supplied. Baked from `MCP_DEFAULT_ORIGIN`
+/// at build time (sourced from `taskfiles/config.yml` → `URL_MCP_DEFAULT`),
+/// falling back to the loopback dev default. The server is always local, so this
+/// is the same in dev and prod. Any scheme baked in is stripped by
+/// [`normalize_origin`] on use.
 pub fn default_origin() -> &'static str {
-    option_env!("MCP_DEFAULT_ORIGIN").unwrap_or("http://127.0.0.1:9171")
+    option_env!("MCP_DEFAULT_ORIGIN").unwrap_or("127.0.0.1:9171")
 }
 
 /// The link's connection state. The top-bar button + modal reflect this.
@@ -65,10 +67,13 @@ const WORKING_COOLDOWN_MS: u32 = 450;
 
 thread_local! {
     static STATUS: Mutable<RemoteStatus> = Mutable::new(RemoteStatus::Disconnected);
-    static ORIGIN: Mutable<String> = Mutable::new(default_origin().to_string());
+    static ORIGIN: Mutable<String> = Mutable::new(normalize_origin(default_origin()));
     /// Pairing code to claim a specific agent (from `?pair=` or the modal). Empty
     /// unless the server needs disambiguation between multiple tabs/agents.
     static PAIR: Mutable<String> = Mutable::new(String::new());
+    /// Use TLS for the link (`wss`/`https`) instead of plain (`ws`/`http`). Off by
+    /// default — the server is normally local. Set via `?tls=true` or the modal.
+    static TLS: Mutable<bool> = Mutable::new(false);
     /// Set when the server replies `PairingRequired`, so the modal can prompt.
     static PAIRING_NEEDED: Mutable<bool> = Mutable::new(false);
     /// Outbound frame sender for the live link; `None` when disconnected. Kept so
@@ -145,6 +150,12 @@ pub fn pair() -> Mutable<String> {
     PAIR.with(|s| s.clone())
 }
 
+/// Whether the link uses TLS (`wss`/`https`). Off by default; set via `?tls=true`
+/// or the modal toggle for a TLS-terminated remote server.
+pub fn tls() -> Mutable<bool> {
+    TLS.with(|s| s.clone())
+}
+
 /// True when the server asked for a pairing code (the modal reveals its field).
 pub fn pairing_needed() -> Mutable<bool> {
     PAIRING_NEEDED.with(|s| s.clone())
@@ -188,6 +199,10 @@ pub fn connect(control_origin: String) {
     if status.get() != RemoteStatus::Disconnected {
         return; // already connecting or connected
     }
+    // Canonicalize to a bare `host:port` authority — tolerate (and drop) any
+    // scheme a caller pasted in (`http://`, `ws://`, …) so the stored origin and
+    // the modal pre-fill stay scheme-free.
+    let control_origin = normalize_origin(&control_origin);
     origin().set(control_origin.clone());
     status.set(RemoteStatus::Connecting);
 
@@ -249,22 +264,37 @@ pub fn start_event_forwarding() {
     }));
 }
 
-/// Derive the `/editor` WebSocket URL from a control origin (`http`→`ws`,
-/// `https`→`wss`). The server is loopback HTTP, so this is normally `ws://`.
-fn ws_url(control_origin: &str) -> String {
-    let origin = control_origin.trim_end_matches('/');
-    let ws = if let Some(rest) = origin.strip_prefix("https://") {
-        format!("wss://{rest}")
-    } else if let Some(rest) = origin.strip_prefix("http://") {
-        format!("ws://{rest}")
-    } else {
-        format!("ws://{origin}")
-    };
-    format!("{ws}/editor")
+/// Canonicalize a user-supplied control origin to a bare `host:port` authority:
+/// strip any URL scheme (`http://`, `https://`, `ws://`, `wss://`) and a trailing
+/// slash. The `?mcp=` param and the connect modal both take a scheme-free
+/// authority; this just tolerates a pasted scheme rather than rejecting it.
+fn normalize_origin(origin: &str) -> String {
+    let s = origin.trim();
+    let s = s
+        .strip_prefix("https://")
+        .or_else(|| s.strip_prefix("http://"))
+        .or_else(|| s.strip_prefix("wss://"))
+        .or_else(|| s.strip_prefix("ws://"))
+        .unwrap_or(s);
+    s.trim_end_matches('/').to_string()
+}
+
+/// Derive the `/editor` WebSocket URL from a bare `host:port` authority —
+/// `wss://` when `secure` (the `?tls=true` / modal toggle), else plain `ws://`.
+fn ws_url(authority: &str, secure: bool) -> String {
+    let scheme = if secure { "wss" } else { "ws" };
+    format!("{scheme}://{authority}/editor")
+}
+
+/// Derive the HTTP base (for the `/renders` + `/assets` side-channels) from a
+/// bare `host:port` authority — `https://` when `secure`, else plain `http://`.
+fn http_base(authority: &str, secure: bool) -> String {
+    let scheme = if secure { "https" } else { "http" };
+    format!("{scheme}://{authority}")
 }
 
 async fn run(control_origin: String) -> Result<(), String> {
-    let url = ws_url(&control_origin);
+    let url = ws_url(&control_origin, tls().get());
     tracing::info!("mcp: connecting to {url}");
     let ws = WebSocket::open(&url).map_err(|e| format!("ws open: {e}"))?;
     let (mut sink, mut stream) = ws.split();
@@ -428,8 +458,8 @@ async fn render_wav(
 /// a separate connection from the control link, so a large render never blocks
 /// small frames.
 async fn upload_render(render_id: &str, wav: Vec<u8>) -> Result<(), String> {
-    let origin = ORIGIN.with(|o| o.get_cloned());
-    let url = format!("{}/renders/{render_id}", origin.trim_end_matches('/'));
+    let authority = ORIGIN.with(|o| o.get_cloned());
+    let url = format!("{}/renders/{render_id}", http_base(&authority, tls().get()));
     let body = js_sys::Uint8Array::from(wav.as_slice());
     let resp = gloo_net::http::Request::post(&url)
         .header("content-type", "application/octet-stream")

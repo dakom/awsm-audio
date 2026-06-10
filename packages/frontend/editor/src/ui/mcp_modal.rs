@@ -113,14 +113,16 @@ pub fn render() -> Dom {
 }
 
 fn view() -> Dom {
-    // Seed the editable fields from the remembered origin + pairing code.
+    // Seed the editable fields from the remembered origin + pairing code + TLS.
     let value = Mutable::new(remote::origin().get_cloned());
     let pair_value = Mutable::new(remote::pair().get_cloned());
+    let tls_value = Mutable::new(remote::tls().get());
 
-    let submit = clone!(value, pair_value => move || {
+    let submit = clone!(value, pair_value, tls_value => move || {
         let origin = value.get_cloned().trim().to_string();
         let code = pair_value.get_cloned().trim().to_string();
         remote::pair().set(code.clone());
+        remote::tls().set(tls_value.get());
         if remote::status().get() == RemoteStatus::Connected {
             // Already attached — just (re)claim a binding with the entered code.
             if !code.is_empty() {
@@ -189,7 +191,7 @@ fn view() -> Dom {
                     .style("color", "var(--text-1)")
                     .attr("type", "text")
                     .attr("spellcheck", "false")
-                    .attr("placeholder", "http://127.0.0.1:9171")
+                    .attr("placeholder", "127.0.0.1:9171")
                     .attr("value", &value.get_cloned())
                     .with_node!(input => {
                         .event(clone!(value, input => move |_: events::Input| {
@@ -239,6 +241,28 @@ fn view() -> Dom {
                     .visible_signal(remote::pairing_needed().signal())
                     .text("This server has more than one editor/agent connected — \
                            enter the pairing code your agent printed to attach this tab.")
+                }))
+                // TLS: off by default (the server is normally local plain HTTP).
+                // Tick for a TLS-terminated remote server — same as `&tls=true`.
+                .child(html!("label", {
+                    .style("display", "flex")
+                    .style("align-items", "center")
+                    .style("gap", "8px")
+                    .style("margin-top", "10px")
+                    .style("font-size", "13px")
+                    .style("color", "var(--text-2)")
+                    .style("cursor", "pointer")
+                    .style("user-select", "none")
+                    .child(html!("input" => web_sys::HtmlInputElement, {
+                        .attr("type", "checkbox")
+                        .apply(clone!(tls_value => move |b| if tls_value.get() { b.attr("checked", "") } else { b }))
+                        .with_node!(cb => {
+                            .event(clone!(tls_value, cb => move |_: events::Change| {
+                                tls_value.set(cb.checked());
+                            }))
+                        })
+                    }))
+                    .text("Use TLS (wss/https) — for a server behind HTTPS")
                 }))
                 .child(html!("div", {
                     .style("display", "flex")

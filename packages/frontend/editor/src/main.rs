@@ -46,15 +46,19 @@ fn main() {
     dominator::append_dom(&dominator::body(), ui::render());
 
     // Auto-attach to an MCP server when the page is loaded with
-    // `?mcp=<control-origin>` (e.g. `?mcp=http://127.0.0.1:9171`), optionally
-    // `&pair=<code>` to claim a specific agent. Without `mcp` the link stays idle
-    // until the user connects via the top-bar button.
+    // `?mcp=<host:port>` (e.g. `?mcp=127.0.0.1:9171`), optionally `&pair=<code>`
+    // to claim a specific agent and `&tls=true` for a TLS-terminated server
+    // (`wss`/`https`). Without `mcp` the link stays idle until the user connects
+    // via the top-bar button.
     remote::start_event_forwarding();
     if let Some(code) = query_param("pair") {
         remote::pair().set(code);
     }
+    if query_param("tls").is_some_and(|v| v == "true") {
+        remote::tls().set(true);
+    }
     if let Some(origin) = query_param("mcp") {
-        remote::origin().set(origin.clone());
+        // `connect` normalizes the authority and stores it; no need to set it here.
         remote::connect(origin);
     }
 }

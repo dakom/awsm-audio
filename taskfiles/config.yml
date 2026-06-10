@@ -21,8 +21,9 @@ vars:
   # URLs — dev
   URL_DEV_EDITOR: "http://localhost:{{.PORT_EDITOR_DEV}}"
 
-  # The default MCP server origin the editor dials out to (always local).
-  URL_MCP_DEFAULT: "http://127.0.0.1:{{.PORT_MCP_HTTP_DEV}}"
+  # The default MCP server authority (`host:port`, no scheme) the editor dials
+  # out to (always local). The editor derives ws/http from it (loopback → plain).
+  URL_MCP_DEFAULT: "127.0.0.1:{{.PORT_MCP_HTTP_DEV}}"
 
   # URLs — Cloudflare Pages deploy target (served at the project root)
   URL_EDITOR: "/"

@@ -40,3 +40,44 @@ tasks:
     cmds:
       - rm -rf {{joinPath .PATH_CRATE "dist"}}
       - rm -rf {{.PATH_DIST}}
+
+  deploy:
+    desc: "Build the editor and deploy it to Cloudflare Pages (project: awsm-audio)"
+    deps: ["build"]
+    requires:
+      vars:
+        [
+          CLOUDFLARE_DEPLOY_WORKERS_TOKEN,
+          CLOUDFLARE_PAGES_PROJECT,
+          CLOUDFLARE_PAGES_BRANCH,
+        ]
+    env:
+      CLOUDFLARE_API_TOKEN: "{{.CLOUDFLARE_DEPLOY_WORKERS_TOKEN}}"
+    cmds:
+      - task: _cloudflare-ensure-project
+      - >
+        wrangler pages deploy "{{.PATH_DIST}}"
+        --project-name="{{.CLOUDFLARE_PAGES_PROJECT}}"
+        --branch "{{.CLOUDFLARE_PAGES_BRANCH}}"
+
+  _cloudflare-ensure-project:
+    desc: "Ensure the Cloudflare Pages project exists"
+    internal: true
+    requires:
+      vars:
+        [
+          CLOUDFLARE_DEPLOY_WORKERS_TOKEN,
+          CLOUDFLARE_PAGES_PROJECT,
+          CLOUDFLARE_PAGES_BRANCH,
+        ]
+    env:
+      CLOUDFLARE_API_TOKEN: "{{.CLOUDFLARE_DEPLOY_WORKERS_TOKEN}}"
+    cmds:
+      - |
+        set -euo pipefail
+        PROJECT="{{.CLOUDFLARE_PAGES_PROJECT}}"
+        if wrangler pages project list --json | jq -e --arg project "$PROJECT" '.[] | select(."Project Name" == $project)' >/dev/null; then
+          echo "Cloudflare Pages project exists: $PROJECT"
+        else
+          wrangler pages project create "$PROJECT" --production-branch "{{.CLOUDFLARE_PAGES_BRANCH}}"
+        fi

@@ -107,8 +107,13 @@ or `task mcp:install` from a clone (builds release → `~/.cargo/bin`).
    or load the editor with `?mcp=` to auto-connect:
 
    ```
-   http://localhost:9170/?mcp=http://127.0.0.1:9171
+   http://localhost:9170/?mcp=127.0.0.1:9171
    ```
+
+   The `?mcp=` value is a bare `host:port` (the link defaults to plain
+   `ws`/`http`, since the server is normally local). For a TLS-terminated remote
+   server, add `&tls=true` to use `wss`/`https` (or tick the box in the connect
+   modal).
 
    The server logs `editor attached`; the top-bar button shows **MCP ✓** and a
    **🤖 working… / idle** chip tells you when it's safe to edit / when a render is

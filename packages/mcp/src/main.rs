@@ -18,14 +18,14 @@ use clap::Parser;
 
 use crate::link::EditorLink;
 
-const DEFAULT_CLIENT_PORT: u16 = 9171;
+const DEFAULT_PORT: u16 = 9171;
 
 /// CLI arguments: the single listen port.
 ///
 /// One HTTP listener serves two peers: the MCP client / agent (rmcp `/mcp` +
 /// `/debug`) and the in-browser editor (the `/editor` WebSocket it dials out to,
 /// plus the `/renders` + `/assets` byte side-channels). This is the
-/// `?mcp=http://127.0.0.1:<port>` origin the editor points at.
+/// `?mcp=127.0.0.1:<port>` origin the editor points at.
 #[derive(Debug, Parser)]
 #[command(
     name = "awsm-audio-mcp",
@@ -33,18 +33,18 @@ const DEFAULT_CLIENT_PORT: u16 = 9171;
     about = "Native MCP server for the awsm-audio editor.",
     long_about = "Native MCP server for the awsm-audio editor — a stateless bridge \
 between an MCP client and the in-browser editor.\n\n\
-One HTTP listener (--client-port) serves both peers:\n\
+One HTTP listener (--port) serves both peers:\n\
   - the MCP client / agent: the rmcp `/mcp` endpoint (+ `/debug`),\n\
   - the in-browser editor: the `/editor` WebSocket it dials out to, plus the \
 `/renders/<id>` side-channel it uploads `.wav` renders on.\n\
-This is the `?mcp=http://127.0.0.1:<port>` origin the editor points at."
+This is the `?mcp=127.0.0.1:<port>` origin the editor points at."
 )]
 struct Args {
     /// HTTP port for the MCP client (rmcp `/mcp`, `/debug`), the editor `/editor`
-    /// WebSocket, and the `/renders` side-channel; the `?mcp=http://127.0.0.1:<port>`
+    /// WebSocket, and the `/renders` side-channel; the `?mcp=127.0.0.1:<port>`
     /// origin the editor points at.
-    #[arg(long, default_value_t = DEFAULT_CLIENT_PORT)]
-    client_port: u16,
+    #[arg(long, default_value_t = DEFAULT_PORT)]
+    port: u16,
 }
 
 #[tokio::main]
@@ -58,9 +58,9 @@ async fn main() -> Result<()> {
 
     let args = Args::parse();
 
-    let link = EditorLink::shared(format!("http://127.0.0.1:{}", args.client_port));
+    let link = EditorLink::shared(format!("http://127.0.0.1:{}", args.port));
 
-    let http_addr = SocketAddr::from(([127, 0, 0, 1], args.client_port));
+    let http_addr = SocketAddr::from(([127, 0, 0, 1], args.port));
     tracing::info!(
         "awsm-audio-mcp: rmcp /mcp + editor /editor ws + /renders on http://{http_addr}"
     );

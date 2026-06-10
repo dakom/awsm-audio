@@ -12,8 +12,8 @@ includes:
     taskfile: ./taskfiles/frontend/editor.yml
   mcp:
     taskfile: ./taskfiles/mcp.yml
-  publish:
-    taskfile: ./taskfiles/publish.yml
+  crates:
+    taskfile: ./taskfiles/crates/publish.yml
 
 tasks:
   default:
@@ -28,7 +28,7 @@ tasks:
       - task: editor:dev
 
   mcp-dev:
-    desc: "Editor + MCP server. Open http://localhost:9170/?mcp=http://127.0.0.1:9171 to attach."
+    desc: "Editor + MCP server. Open http://localhost:9170/?mcp=127.0.0.1:9171 to attach."
     deps:
       - editor:dev
       - mcp:serve
@@ -43,47 +43,6 @@ tasks:
     desc: "Remove every frontend's dist + .build-artifacts output"
     cmds:
       - task: editor:clean
-
-  deploy:
-    desc: "Build the editor and deploy it to Cloudflare Pages (project: awsm-audio)"
-    deps: ["editor:build"]
-    requires:
-      vars:
-        [
-          CLOUDFLARE_DEPLOY_WORKERS_TOKEN,
-          CLOUDFLARE_PAGES_PROJECT,
-          CLOUDFLARE_PAGES_BRANCH,
-        ]
-    env:
-      CLOUDFLARE_API_TOKEN: "{{.CLOUDFLARE_DEPLOY_WORKERS_TOKEN}}"
-    cmds:
-      - task: _cloudflare-ensure-project
-      - >
-        wrangler pages deploy "{{joinPath .PATH_BUILD_ARTIFACTS "editor"}}"
-        --project-name="{{.CLOUDFLARE_PAGES_PROJECT}}"
-        --branch "{{.CLOUDFLARE_PAGES_BRANCH}}"
-
-  _cloudflare-ensure-project:
-    desc: "Ensure the Cloudflare Pages project exists"
-    internal: true
-    requires:
-      vars:
-        [
-          CLOUDFLARE_DEPLOY_WORKERS_TOKEN,
-          CLOUDFLARE_PAGES_PROJECT,
-          CLOUDFLARE_PAGES_BRANCH,
-        ]
-    env:
-      CLOUDFLARE_API_TOKEN: "{{.CLOUDFLARE_DEPLOY_WORKERS_TOKEN}}"
-    cmds:
-      - |
-        set -euo pipefail
-        PROJECT="{{.CLOUDFLARE_PAGES_PROJECT}}"
-        if wrangler pages project list --json | jq -e --arg project "$PROJECT" '.[] | select(."Project Name" == $project)' >/dev/null; then
-          echo "Cloudflare Pages project exists: $PROJECT"
-        else
-          wrangler pages project create "$PROJECT" --production-branch "{{.CLOUDFLARE_PAGES_BRANCH}}"
-        fi
 
   lint:
     desc: "Run rustfmt + clippy with -D warnings (mirrors CI: wasm32 + host)."
