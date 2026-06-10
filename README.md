@@ -69,7 +69,7 @@ attached"*), and your **agent**. Set them up in that order:
 
 ### Install the server
 
-Prebuilt binaries (once a release is published) — no toolchain needed:
+Prebuilt binaries — no toolchain needed:
 
 ```bash
 # macOS / Linux
@@ -82,6 +82,9 @@ brew install dakom/tap/awsm-audio-mcp
 
 From source: `cargo install --git https://github.com/dakom/awsm-audio awsm-audio-mcp`,
 or `task mcp:install` from a clone (builds release → `~/.cargo/bin`).
+
+(Maintainers: cutting a new release is one `git tag` — see
+[docs/RELEASING.md](docs/RELEASING.md).)
 
 ### Quick start
 
