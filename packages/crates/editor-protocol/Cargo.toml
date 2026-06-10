@@ -1,6 +1,6 @@
 [package]
 name = "awsm-audio-editor-protocol"
-description = "Shared serializable command/query/transport vocabulary for driving the awsm-audio editor over MCP/WebTransport."
+description = "Shared serializable command/query/transport vocabulary for driving the awsm-audio editor over MCP/WebSocket."
 # Internal: shared only between the editor frontend and the MCP server. Not a
 # crate creators depend on, so it's kept off crates.io.
 publish = false

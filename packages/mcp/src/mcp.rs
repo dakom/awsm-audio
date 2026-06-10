@@ -1,7 +1,8 @@
 //! The rmcp tool layer. Each tool is a thin typed wrapper that builds a protocol
-//! [`Request`] and relays it to the attached editor over the WebTransport link,
-//! then shapes the [`Response`] into an MCP result. All editor mutation flows
-//! through `EditorController` on the far side; this layer only translates.
+//! [`Request`] and relays it to this session's bound editor tab over the
+//! WebSocket link, then shapes the [`Response`] into an MCP result. All editor
+//! mutation flows through `EditorController` on the far side; this layer only
+//! translates.
 //!
 //! Coverage: discovery/read queries, the WAV readback surface (render_wav /
 //! wav_stats / waveform), transport, a few ergonomic typed mutators, and the
@@ -31,12 +32,19 @@ use awsm_audio_editor_protocol::{
     Response,
 };
 
-use crate::link::EditorLink;
+use std::sync::Arc;
 
-/// The MCP tool provider. Cheap to clone (the link is an `Arc` handle).
+use crate::link::{AgentSession, EditorLink, LinkError};
+
+/// The MCP tool provider — one per MCP session. Cheap to clone (handles are
+/// `Arc`s); clones share the same [`AgentSession`], so a session's editor binding
+/// is stable across clones.
 #[derive(Clone)]
 pub struct EditorMcp {
     link: EditorLink,
+    /// This session's identity + editor binding. Every request routes only to the
+    /// bound editor tab.
+    agent: Arc<AgentSession>,
     // Populated by `Self::tool_router()` and consumed by the `#[tool_handler]`
     // generated routing; the dead-code lint can't see that use.
     #[allow(dead_code)]
@@ -151,6 +159,25 @@ pub struct MarkersParams {
     /// Loop/export end marker (seconds). Must be > start to take effect.
     #[serde(default)]
     pub end: Option<f64>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct LoadAudioParams {
+    /// AudioBufferSource (or Convolver) node to load the audio into. Create one
+    /// first with add_node (kind audio_buffer_source).
+    pub node: NodeId,
+    /// An agent-local audio file path (WAV/mp3/flac/ogg/…). The server reads it,
+    /// hosts it off the link, and the editor fetches + decodes it. Provide this
+    /// OR `url`, not both.
+    #[serde(default)]
+    pub path: Option<String>,
+    /// A browser-reachable audio URL the editor fetches directly. Provide this OR
+    /// `path`, not both.
+    #[serde(default)]
+    pub url: Option<String>,
+    /// Optional label for the created buffer asset.
+    #[serde(default)]
+    pub label: Option<String>,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
@@ -292,8 +319,10 @@ pub struct DuplicateClipsParams {
 #[tool_router]
 impl EditorMcp {
     pub fn new(link: EditorLink) -> Self {
+        let agent = link.register_agent();
         Self {
             link,
+            agent,
             tool_router: Self::tool_router(),
         }
     }
@@ -941,6 +970,57 @@ impl EditorMcp {
         }
     }
 
+    #[tool(
+        description = "Load an external audio file (WAV/mp3/flac/ogg/…) into an \
+        existing AudioBufferSource (or Convolver) node's buffer. add_node an \
+        audio_buffer_source first, then load_audio onto it, then connect it. \
+        Provide exactly one of `path` (an agent-local file — the server hosts it \
+        and the editor fetches it off the link) or `url` (a browser-reachable \
+        URL). Bytes never cross the editor link. Returns the decoded duration / \
+        sample-rate / channel count; render_wav / waveform to inspect it."
+    )]
+    async fn load_audio(
+        &self,
+        Parameters(p): Parameters<LoadAudioParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let url = match (p.path, p.url) {
+            (Some(_), Some(_)) => {
+                return Err(McpError::invalid_params(
+                    "provide exactly one of `path` or `url`, not both",
+                    None,
+                ));
+            }
+            (None, None) => {
+                return Err(McpError::invalid_params("need `path` or `url`", None));
+            }
+            (Some(path), None) => {
+                let bytes = std::fs::read(&path)
+                    .map_err(|e| McpError::invalid_params(format!("read {path}: {e}"), None))?;
+                let id = uuid::Uuid::new_v4().to_string();
+                self.link
+                    .store_asset(id.clone(), bytes, content_type_for(&path));
+                format!("{}/assets/{}", self.link.self_origin(), id)
+            }
+            (None, Some(url)) => url,
+        };
+        match self
+            .req(Request::LoadAudio {
+                node: p.node,
+                url,
+                label: p.label,
+            })
+            .await?
+        {
+            Response::AudioLoaded(info) => Ok(text(format!(
+                "loaded {} channel(s), {:.3}s @ {} Hz (asset {}); the node's buffer is set — \
+                 connect it and render_wav / waveform to inspect.",
+                info.channels, info.duration_secs, info.sample_rate, info.asset_id
+            ))),
+            Response::Err(e) => Err(McpError::internal_error(e, None)),
+            other => Err(unexpected(other)),
+        }
+    }
+
     // ── generic escape hatches ───────────────────────────────────────────────
 
     #[tool(description = "Dispatch any EditorCommand (escape hatch for commands \
@@ -984,9 +1064,20 @@ impl EditorMcp {
 impl EditorMcp {
     async fn req(&self, r: Request) -> Result<Response, McpError> {
         self.link
-            .request(&r)
+            .request(&self.agent, &r)
             .await
-            .map_err(|e| McpError::internal_error(e.to_string(), None))
+            .map_err(|e| match e {
+                LinkError::PairingRequired(code) => McpError::invalid_request(
+                    format!(
+                        "No editor is paired with this MCP session. Ask the user to open the \
+                         awsm-audio editor with `?pair={code}` appended to its URL, or to enter \
+                         pairing code `{code}` in the editor's MCP connect modal. (Auto-pairs \
+                         when exactly one editor tab and one agent are connected.)"
+                    ),
+                    None,
+                ),
+                LinkError::Transport(msg) => McpError::internal_error(msg, None),
+            })
     }
 
     async fn dispatch(&self, cmd: EditorCommand) -> Result<CallToolResult, McpError> {
@@ -1023,18 +1114,22 @@ impl EditorMcp {
         }
     }
 
-    /// RenderWav → save the `.wav` to a temp file, return the path + a one-line
-    /// summary. (An agent can't hear bytes; the human/tooling opens the file.)
+    /// RenderWav → the editor uploaded the `.wav` out-of-band (off the link); we
+    /// return its on-disk path + a one-line summary. (An agent can't hear bytes;
+    /// the human/tooling opens the file or fetches `/renders/<id>.wav`.)
     async fn wav(&self, r: Request) -> Result<CallToolResult, McpError> {
         match self.req(r).await? {
-            Response::Wav(bytes) => {
-                let path = std::env::temp_dir().join("awsm-audio-mcp-last.wav");
-                std::fs::write(&path, &bytes)
-                    .map_err(|e| McpError::internal_error(format!("write wav: {e}"), None))?;
+            Response::Render(h) => {
+                let path = crate::http::render_path(&h.render_id);
                 Ok(text(format!(
-                    "wrote {} bytes to {}",
-                    bytes.len(),
-                    path.display()
+                    "wrote {} bytes to {} (also at /renders/{}.wav) — \
+                     duration {:.3}s, peak {:.3}, rms {:.3}",
+                    h.byte_len,
+                    path.display(),
+                    h.render_id,
+                    h.duration_secs,
+                    h.peak,
+                    h.rms,
                 )))
             }
             Response::Err(e) => Err(McpError::internal_error(e, None)),
@@ -1059,7 +1154,10 @@ impl ServerHandler for EditorMcp {
              discover node/sample ids, mutate with the graph/sequencer/arrangement \
              tools (or dispatch_command / dispatch_batch for anything without a \
              dedicated tool), bounce a Sound and call render_wav / wav_stats / \
-             waveform to inspect the result. To add a custom DSP node, read the \
+             waveform to inspect the result. To use an external audio sample (a \
+             drum hit, vocal, field recording, impulse response), add_node an \
+             audio_buffer_source (or convolver) and load_audio a local file path \
+             or a URL onto it. To add a custom DSP node, read the \
              awsm-audio://docs/worklet-abi resource, author + build a worklet crate, and \
              attach it with the attach_wasm tool.\n\n\
              For a song / full-track / genre request, work arrangement-first instead \
@@ -1075,14 +1173,19 @@ impl ServerHandler for EditorMcp {
         info
     }
 
-    // ── push channel: forward editor events as MCP logging notifications ─────
+    // ── push channel: forward this session's editor events as MCP logging ────
     async fn on_initialized(&self, context: NotificationContext<RoleServer>) {
         let mut rx = self.link.subscribe_events();
         let peer = context.peer;
+        let agent = self.agent.clone();
         tokio::spawn(async move {
             loop {
                 match rx.recv().await {
-                    Ok(ev) => {
+                    Ok((conn_id, ev)) => {
+                        // Only forward events from the tab this agent is bound to.
+                        if agent.bound_conn_id() != Some(conn_id) {
+                            continue;
+                        }
                         let level = match ev.level.as_deref() {
                             Some("error") => LoggingLevel::Error,
                             Some("warning") => LoggingLevel::Warning,
@@ -1474,6 +1577,26 @@ percussion layers, atmospheric FX. Build each as a loop, bounce, arrange.)
 
 fn text(s: impl Into<String>) -> CallToolResult {
     CallToolResult::success(vec![Content::text(s.into())])
+}
+
+/// Best-effort content type from a file extension (for hosting a loaded audio
+/// file). `decodeAudioData` sniffs the bytes regardless, so this is advisory.
+fn content_type_for(path: &str) -> String {
+    let p = path.to_lowercase();
+    if p.ends_with(".wav") {
+        "audio/wav"
+    } else if p.ends_with(".mp3") {
+        "audio/mpeg"
+    } else if p.ends_with(".flac") {
+        "audio/flac"
+    } else if p.ends_with(".ogg") || p.ends_with(".oga") {
+        "audio/ogg"
+    } else if p.ends_with(".m4a") || p.ends_with(".aac") {
+        "audio/aac"
+    } else {
+        "application/octet-stream"
+    }
+    .to_string()
 }
 
 fn unexpected(resp: Response) -> McpError {

@@ -4613,6 +4613,83 @@ impl EditorController {
         });
     }
 
+    /// Load audio from `url` into `node`'s buffer (the MCP `load_audio` tool).
+    /// Fetches + decodes off the editor link; caches the decoded PCM onto the
+    /// asset so offline renders (bounce / `render_wav`) see it. Returns the
+    /// decoded buffer's shape.
+    pub async fn load_audio_url(
+        &self,
+        node: NodeId,
+        url: String,
+        label: Option<String>,
+    ) -> Result<awsm_audio_editor_protocol::AudioInfo, String> {
+        use awsm_audio_schema::{AudioSource, BufferAsset, NodeKind};
+        if !self.ensure_player() {
+            return Err("audio context unavailable".into());
+        }
+        let buffer_node = self
+            .node_by_id(node)
+            .map(|n| {
+                matches!(
+                    &*n.kind.borrow(),
+                    NodeKind::AudioBufferSource(_) | NodeKind::Convolver(_)
+                )
+            })
+            .unwrap_or(false);
+        if !buffer_node {
+            return Err(format!(
+                "node {node} is not an audio_buffer_source or convolver"
+            ));
+        }
+        let array_buf = fetch_bytes(&url)
+            .await
+            .map_err(|e| format!("fetch {url}: {e:?}"))?;
+        let promise = {
+            let slot = self.player.borrow();
+            slot.as_ref()
+                .and_then(|p| p.decode(&array_buf).ok())
+                .ok_or_else(|| "decode unavailable".to_string())?
+        };
+        let decoded = wasm_bindgen_futures::JsFuture::from(promise)
+            .await
+            .map_err(|e| format!("decodeAudioData failed (unsupported format?): {e:?}"))?;
+        let buffer: web_sys::AudioBuffer = decoded.unchecked_into();
+        let sample_rate = buffer.sample_rate();
+        let nch = buffer.number_of_channels();
+        let duration_secs = buffer.duration();
+        let mut channels: Vec<Vec<f32>> = Vec::with_capacity(nch as usize);
+        for ch in 0..nch {
+            if let Ok(d) = buffer.get_channel_data(ch) {
+                channels.push(d);
+            }
+        }
+        if channels.is_empty() {
+            return Err("decoded buffer has no channels".into());
+        }
+        let asset = awsm_audio_schema::AssetId::new();
+        self.buffer_assets.borrow_mut().insert(
+            asset,
+            BufferAsset {
+                id: asset,
+                label,
+                source: AudioSource::Pcm {
+                    sample_rate,
+                    channels,
+                },
+            },
+        );
+        if let Some(p) = self.player.borrow_mut().as_mut() {
+            p.store_buffer(asset, buffer);
+        }
+        self.set_node_buffer(node, asset);
+        Ok(awsm_audio_editor_protocol::AudioInfo {
+            asset_id: asset.to_string(),
+            duration_secs,
+            sample_rate,
+            channels: nch as usize,
+        })
+    }
+
     /// Point an `AudioBufferSource` (or `Convolver` IR) node at a decoded buffer.
     fn set_node_buffer(&self, node: NodeId, asset: awsm_audio_schema::AssetId) {
         use awsm_audio_schema::NodeKind;

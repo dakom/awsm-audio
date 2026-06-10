@@ -113,13 +113,21 @@ pub fn render() -> Dom {
 }
 
 fn view() -> Dom {
-    // Seed the editable field from the remembered origin.
+    // Seed the editable fields from the remembered origin + pairing code.
     let value = Mutable::new(remote::origin().get_cloned());
+    let pair_value = Mutable::new(remote::pair().get_cloned());
 
-    let submit = clone!(value => move || {
-        let origin = value.get_cloned();
-        let origin = origin.trim().to_string();
-        if !origin.is_empty() {
+    let submit = clone!(value, pair_value => move || {
+        let origin = value.get_cloned().trim().to_string();
+        let code = pair_value.get_cloned().trim().to_string();
+        remote::pair().set(code.clone());
+        if remote::status().get() == RemoteStatus::Connected {
+            // Already attached — just (re)claim a binding with the entered code.
+            if !code.is_empty() {
+                remote::submit_pair_code(code);
+            }
+        } else if !origin.is_empty() {
+            // `run` sends the stashed pairing code on attach.
             remote::connect(origin);
         }
         open_state().set(false);
@@ -166,8 +174,8 @@ fn view() -> Dom {
                     .style("font-size", "13px")
                     .style("line-height", "1.5")
                     .style("color", "var(--text-2)")
-                    .text("The editor dials out to a local MCP server over \
-                           WebTransport. Start it with `task mcp:serve`, then \
+                    .text("The editor dials out to a local MCP server over a \
+                           WebSocket. Start it with `task mcp:serve`, then \
                            connect to its control origin.")
                 }))
                 .child(html!("input" => web_sys::HtmlInputElement, {
@@ -193,6 +201,44 @@ fn view() -> Dom {
                             }
                         }))
                     })
+                }))
+                // Pairing code: only needed when more than one tab/agent is
+                // connected (the server asks via `PairingRequired`). The field is
+                // always available; the hint appears when it's actually required.
+                .child(html!("input" => web_sys::HtmlInputElement, {
+                    .style("width", "100%")
+                    .style("box-sizing", "border-box")
+                    .style("margin-top", "8px")
+                    .style("padding", "8px 10px")
+                    .style("font-size", "13.5px")
+                    .style("border-radius", "8px")
+                    .style("border", "1px solid var(--line)")
+                    .style("background", "var(--bg-1)")
+                    .style("color", "var(--text-1)")
+                    .style("text-transform", "uppercase")
+                    .attr("type", "text")
+                    .attr("spellcheck", "false")
+                    .attr("placeholder", "pairing code (only if prompted)")
+                    .attr("value", &pair_value.get_cloned())
+                    .with_node!(input => {
+                        .event(clone!(pair_value, input => move |_: events::Input| {
+                            pair_value.set(input.value());
+                        }))
+                        .event(clone!(submit => move |e: events::KeyDown| {
+                            if e.key() == "Enter" {
+                                submit();
+                            }
+                        }))
+                    })
+                }))
+                .child(html!("p", {
+                    .style("margin", "8px 0 0")
+                    .style("font-size", "12px")
+                    .style("line-height", "1.45")
+                    .style("color", "var(--warning, var(--accent-bright))")
+                    .visible_signal(remote::pairing_needed().signal())
+                    .text("This server has more than one editor/agent connected — \
+                           enter the pairing code your agent printed to attach this tab.")
                 }))
                 .child(html!("div", {
                     .style("display", "flex")

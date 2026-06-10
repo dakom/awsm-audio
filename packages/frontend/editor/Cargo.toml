@@ -9,6 +9,11 @@ authors.workspace = true
 rust-version.workspace = true
 repository.workspace = true
 
+# This is a wasm-only frontend (built with Trunk), not a host binary — exclude it
+# from cargo-dist's prebuilt-binary packaging.
+[package.metadata.dist]
+dist = false
+
 [dependencies]
 awsm-audio-player = { workspace = true }
 awsm-audio-schema = { workspace = true }
@@ -26,18 +31,17 @@ base64 = { workspace = true }
 
 dominator = { workspace = true }
 futures-signals = { workspace = true }
+futures = { workspace = true }
 
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 toml = { workspace = true }
 uuid = { version = "1.11.0", features = ["v4", "serde", "js"] }
 
-# MCP remote-control link: the editor dials out to the native MCP server over
-# WebTransport, fetching the cert-hash discovery doc via gloo-net.
-web-transport = "0.10.5"
-gloo-net = { version = "0.6", features = ["http"] }
+# MCP remote-control link: the editor dials out to the native MCP server over a
+# WebSocket (`gloo-net` websocket); `http` for the render-upload POST.
+gloo-net = { version = "0.6", features = ["http", "websocket"] }
 gloo-timers = { version = "0.3", features = ["futures"] }
-url = "2"
 
 # Additive on top of the workspace web-sys baseline: pointer/wheel/keyboard
 # events and DomRect for the pan/zoom canvas coordinate math.

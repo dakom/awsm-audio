@@ -1,8 +1,8 @@
-//! The request/response envelope exchanged over the WebTransport link between
-//! the native MCP server and the in-browser editor. One request per
-//! server-initiated bidi stream; the editor replies on the same stream. No
-//! request-id correlation — stream identity is the correlation, framing is by
-//! stream-finish. JSON-encoded.
+//! The request/response vocabulary exchanged over the editor link between the
+//! native MCP server and the in-browser editor, plus the [`WsServerMsg`] /
+//! [`WsClientMsg`] frames that carry them over the WebSocket. The link is one
+//! ordered channel, so `id` correlates each [`Response`] to its [`Request`].
+//! JSON text frames.
 
 use serde::{Deserialize, Serialize};
 
@@ -55,10 +55,50 @@ pub enum Request {
         #[serde(default)]
         label: String,
     },
+    /// Load an external audio file into an `AudioBufferSource` (or `Convolver`)
+    /// node's buffer. The editor fetches `url` and `decodeAudioData`s it — bytes
+    /// never ride this link. For an agent-local file the server hosts it under
+    /// `/assets/<id>` and passes that URL here.
+    LoadAudio {
+        node: NodeId,
+        url: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        label: Option<String>,
+    },
 }
 
-/// Editor → server **push** event (unsolicited channel). One per uni stream.
-/// Relayed to the agent as an MCP logging notification.
+/// Server → browser WebSocket frame.
+// `Request` is the dominant variant (one per editor request), so boxing it to
+// shrink the rarely-used unit variants would just add an allocation to the hot
+// path.
+#[allow(clippy::large_enum_variant)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum WsServerMsg {
+    /// Serve this request and reply with [`WsClientMsg::Response`] carrying the
+    /// same `id`.
+    Request { id: u64, req: Request },
+    /// The agent that wants this editor is ambiguous and supplied no pairing
+    /// code — the editor should prompt for one and send [`WsClientMsg::Pair`].
+    PairingRequired,
+    /// This socket's binding was taken over (another tab/agent paired) — the
+    /// editor should show itself disconnected.
+    Detached,
+}
+
+/// Browser → server WebSocket frame.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum WsClientMsg {
+    /// Claim a binding to the agent holding this pairing code. Optional first
+    /// frame; unnecessary in the unambiguous 1:1 auto-bind case.
+    Pair { code: String },
+    /// Reply to a [`WsServerMsg::Request`] with the matching `id`.
+    Response { id: u64, resp: Response },
+    /// An unsolicited editor push event.
+    Event(EditorEvent),
+}
+
+/// Editor → server **push** event (unsolicited channel). Relayed to the bound
+/// agent as an MCP logging notification.
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EditorEvent {
@@ -74,6 +114,37 @@ pub struct EditorEvent {
     pub nodes: Option<Vec<String>>,
 }
 
+/// A reference to a render the editor has uploaded out-of-band. The WAV bytes do
+/// **not** ride the control link — the editor POSTs them to the server's
+/// `/renders/<render_id>` HTTP route and returns this small handle here instead.
+/// Keeps the link byte-light (a large render never blocks small frames).
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RenderHandle {
+    /// Opaque id (uuid v4) the editor minted and POSTed the bytes under.
+    pub render_id: String,
+    /// Size of the uploaded `.wav` in bytes.
+    pub byte_len: usize,
+    /// Rendered duration in seconds.
+    pub duration_secs: f64,
+    /// Peak absolute sample (0.0..=1.0+; >1.0 means clipping).
+    pub peak: f32,
+    /// RMS level across the render.
+    pub rms: f32,
+}
+
+/// Result of a [`Request::LoadAudio`] — the decoded buffer's shape, so the agent
+/// can confirm the load without the samples crossing the link.
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AudioInfo {
+    /// The buffer asset the editor created and assigned to the node.
+    pub asset_id: String,
+    pub duration_secs: f64,
+    pub sample_rate: f32,
+    pub channels: usize,
+}
+
 /// Editor → server. The reply to a [`Request`].
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -82,8 +153,11 @@ pub enum Response {
     Ok,
     /// A query result (boxed — `QueryResult::Snapshot` is large).
     Query(Box<QueryResult>),
-    /// Raw `.wav` file bytes (RIFF/WAVE container).
-    Wav(Vec<u8>),
+    /// A render reference. The `.wav` bytes were uploaded out-of-band (see
+    /// [`RenderHandle`]); only this handle crosses the control link.
+    Render(RenderHandle),
+    /// An audio buffer was loaded into a node (see [`Request::LoadAudio`]).
+    AudioLoaded(AudioInfo),
     /// The request failed; the string is a human-readable reason.
     Err(String),
 }

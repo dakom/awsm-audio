@@ -1,5 +1,5 @@
 //! Shared, serializable command/query/transport vocabulary for driving the
-//! awsm-audio editor remotely (MCP / WebTransport) and from headless tests.
+//! awsm-audio editor remotely (MCP / WebSocket) and from headless tests.
 //!
 //! Pure data — no DOM, audio, reactive, or async deps — so it compiles for both
 //! the editor's wasm target and the native MCP server. Heavy payloads (the audio
@@ -26,7 +26,9 @@ pub use query::{
     WavStats, WaveformEnvelope,
 };
 pub use snapshot::{EditorProject, EditorSnapshot, NodeLayout};
-pub use transport::{EditorEvent, Request, Response};
+pub use transport::{
+    AudioInfo, EditorEvent, RenderHandle, Request, Response, WsClientMsg, WsServerMsg,
+};
 
 #[cfg(test)]
 mod tests;

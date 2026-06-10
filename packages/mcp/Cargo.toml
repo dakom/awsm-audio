@@ -1,6 +1,6 @@
 [package]
 name = "awsm-audio-mcp"
-description = "Native MCP server for the awsm-audio editor (WebTransport link + rmcp). Installs as the `awsm-audio-mcp` command."
+description = "Native MCP server for the awsm-audio editor (WebSocket link + rmcp). Installs as the `awsm-audio-mcp` command."
 # MSRV split: rmcp 1.x requires edition-2024 / Rust >= 1.85. The wasm crates stay
 # on the workspace defaults (edition 2021 / 1.80); only this native crate bumps.
 edition = "2024"
@@ -9,7 +9,13 @@ version.workspace = true
 license.workspace = true
 authors.workspace = true
 repository.workspace = true
+homepage = "https://github.com/dakom/awsm-audio"
 publish = false
+
+# Not a crates.io library (`publish = false`), but cargo-dist *does* ship its
+# binary as a prebuilt GitHub Release — opt back in explicitly.
+[package.metadata.dist]
+dist = true
 
 [[bin]]
 name = "awsm-audio-mcp"
@@ -28,17 +34,13 @@ tracing = { workspace = true }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
+futures = { workspace = true }
 
-# WebTransport (QUIC) — quinn on native, self-signed dev cert.
-web-transport = "0.10.5"
-rustls = "0.23"
-rcgen = "0.14"
-sha2 = "0.10"
+# Decode the base64 `.wasm` an agent attaches via `attach_wasm`.
 base64 = { workspace = true }
-time = { version = "0.3", features = ["formatting"] }
 
-# HTTP control surface.
-axum = "0.8"
+# HTTP control surface + the editor WebSocket link.
+axum = { version = "0.8", features = ["ws"] }
 tower-http = { version = "0.6", features = ["cors"] }
 
 # The rmcp /mcp endpoint.

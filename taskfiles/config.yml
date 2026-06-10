@@ -16,8 +16,7 @@ vars:
   # Ports — deliberately in the 91xx block so they never collide with the
   # awsm-renderer dev servers (which live in 9079–9085).
   PORT_EDITOR_DEV: 9170
-  PORT_MCP_HTTP_DEV: 9171 # TCP — rmcp /mcp + /control + /debug
-  PORT_MCP_QUIC_DEV: 9172 # UDP — WebTransport link the editor dials into
+  PORT_MCP_HTTP_DEV: 9171 # TCP — rmcp /mcp + /editor ws + /debug + /renders
 
   # URLs — dev
   URL_DEV_EDITOR: "http://localhost:{{.PORT_EDITOR_DEV}}"

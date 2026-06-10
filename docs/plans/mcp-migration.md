@@ -1,10 +1,18 @@
 # Plan: MCP WebSocket migration + off-link renders + session isolation + distribution
 
-The `awsm-audio-mcp` server is built and working today over WebTransport. This
-plan replaces the transport, moves render bytes off the link, makes agent↔tab
-routing fully isolated, and ships the binary. Every decision below is **locked** —
-this is implementable start to finish. Follow the phases in order; each ends with
-a **build gate** that must pass before moving on.
+> **Status: implemented (2026-06-10).** All three phases landed. Build gates 1–3
+> pass: `task lint` green, protocol tests pass, a headless smoke test of the HTTP
+> surface (ws upgrade → 101, `/renders` POST→GET, `/debug` → "no editor attached"),
+> and `dist build` produces a working `awsm-audio-mcp` binary. **Still requires the
+> user** before a release: (a) create the public `dakom/homebrew-tap` repo + a
+> `HOMEBREW_TAP_TOKEN` repo secret, (b) tag `v0.1.0` to trigger the release
+> workflow, and (c) the *live* parts of build gate 2 (browser attach, render
+> upload, multi-tab pairing/isolation) — these need a real browser + MCP client.
+
+The `awsm-audio-mcp` server was built over WebTransport. This plan replaced the
+transport with a WebSocket, moved render bytes off the link, made agent↔tab
+routing fully isolated, and set up binary distribution. Every decision below is
+**locked**. The phases were followed in order; each ends with a **build gate**.
 
 ---
 

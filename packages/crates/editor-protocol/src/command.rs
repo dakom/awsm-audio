@@ -3,7 +3,7 @@
 //!
 //! Every change to the saved document goes through one command, dispatched to
 //! `EditorController::dispatch` in the editor crate. Because the enum is
-//! serde-derived, this same command stream is exactly what the MCP/WebTransport
+//! serde-derived, this same command stream is exactly what the MCP/WebSocket
 //! transport feeds in — the transport is a thin adapter over `dispatch`.
 //! Authoring a whole song over MCP is "send these commands."
 

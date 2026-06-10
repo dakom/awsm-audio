@@ -1,6 +1,6 @@
 //! The **read** half of the controller surface — the counterpart to
 //! [`EditorCommand`](crate::EditorCommand). A serde-tagged query the
-//! MCP/WebTransport transport (or a headless driver) sends to inspect editor
+//! MCP/WebSocket transport (or a headless driver) sends to inspect editor
 //! state; the controller answers with a [`QueryResult`].
 
 use serde::{Deserialize, Serialize};
@@ -9,7 +9,7 @@ use awsm_audio_schema::{Arrangement, NodeId, NodeKind, SampleId, SampleKind};
 
 use crate::snapshot::{EditorProject, EditorSnapshot};
 
-/// A serde-tagged query an MCP/WebTransport transport (or a headless driver)
+/// A serde-tagged query an MCP/WebSocket transport (or a headless driver)
 /// sends to inspect editor state; the controller answers with a [`QueryResult`].
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Serialize, Deserialize)]

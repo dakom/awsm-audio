@@ -46,21 +46,26 @@ fn main() {
     dominator::append_dom(&dominator::body(), ui::render());
 
     // Auto-attach to an MCP server when the page is loaded with
-    // `?mcp=<control-origin>` (e.g. `?mcp=http://127.0.0.1:9171`). Without the
-    // param the link stays idle until the user connects via the top-bar button.
-    if let Some(origin) = mcp_origin_from_query() {
+    // `?mcp=<control-origin>` (e.g. `?mcp=http://127.0.0.1:9171`), optionally
+    // `&pair=<code>` to claim a specific agent. Without `mcp` the link stays idle
+    // until the user connects via the top-bar button.
+    remote::start_event_forwarding();
+    if let Some(code) = query_param("pair") {
+        remote::pair().set(code);
+    }
+    if let Some(origin) = query_param("mcp") {
         remote::origin().set(origin.clone());
         remote::connect(origin);
     }
 }
 
-/// Parse the `mcp=<origin>` query parameter from the page URL, if present.
-fn mcp_origin_from_query() -> Option<String> {
+/// Parse a `<key>=<value>` query parameter from the page URL, if present.
+fn query_param(key: &str) -> Option<String> {
     let search = web_sys::window()?.location().search().ok()?;
     let trimmed = search.strip_prefix('?').unwrap_or(&search);
     trimmed.split('&').find_map(|pair| {
-        let (key, value) = pair.split_once('=')?;
-        if key != "mcp" {
+        let (k, value) = pair.split_once('=')?;
+        if k != key {
             return None;
         }
         let decoded = js_sys::decode_uri_component(value)

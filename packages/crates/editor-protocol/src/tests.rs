@@ -8,7 +8,8 @@ use serde_json::Value;
 
 use crate::{
     ArrangeOp, Clipboard, EditorCommand, EditorQuery, FieldInfo, FieldValue, NodeKindInfo,
-    QueryResult, Request, Response, SampleInfo, SongOp, TransportInfo, WavStats, WaveformEnvelope,
+    QueryResult, RenderHandle, Request, Response, SampleInfo, SongOp, TransportInfo, WavStats,
+    WaveformEnvelope,
 };
 
 /// JSON round-trip: encode → decode → re-encode and assert the two JSON values
@@ -226,7 +227,13 @@ fn response_round_trip() {
     let responses = vec![
         Response::Ok,
         Response::Err("boom".into()),
-        Response::Wav(vec![0x52, 0x49, 0x46, 0x46]),
+        Response::Render(RenderHandle {
+            render_id: "1f2e3d4c-5b6a-7980-1234-567890abcdef".into(),
+            byte_len: 44,
+            duration_secs: 1.5,
+            peak: 0.9,
+            rms: 0.5,
+        }),
         Response::Query(Box::new(QueryResult::BounceStatus("dirty".into()))),
     ];
     for r in &responses {

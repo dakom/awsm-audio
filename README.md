@@ -51,19 +51,37 @@ and read back WAV stats / waveform envelopes. Great for agent-in-the-loop sound
 design.
 
 ```
-agent (MCP client) ──HTTP /mcp──▶ awsm-audio-mcp ──WebTransport/QUIC──▶ editor (browser tab)
+agent (MCP client) ──HTTP /mcp──▶ awsm-audio-mcp ──WebSocket /editor──▶ editor (browser tab)
                                   (packages/mcp)    editor dials out    → EditorController
 ```
 
 A native server ([`packages/mcp`](packages/mcp), the `awsm-audio-mcp` binary)
 exposes MCP tools over streamable-HTTP and relays each one to a running editor tab
-over a WebTransport (QUIC) link that **the editor dials out to** (a browser tab
-can't be a server). The whole tool vocabulary is strongly typed — `tools/list`
-publishes the exact JSON Schema for every node kind, command, and query.
+over a plain WebSocket that **the editor dials out to** (a browser tab can't be a
+server). Each agent is bound to one editor tab, so requests, responses, and events
+can never cross between sessions. The whole tool vocabulary is strongly typed —
+`tools/list` publishes the exact JSON Schema for every node kind, command, and
+query.
 
 The loop has **three pieces, all required**: the **MCP server**, an attached
 **editor tab** (the audio truth — without it, tool calls return *"no editor
 attached"*), and your **agent**. Set them up in that order:
+
+### Install the server
+
+Prebuilt binaries (once a release is published) — no toolchain needed:
+
+```bash
+# macOS / Linux
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/dakom/awsm-audio/releases/latest/download/awsm-audio-mcp-installer.sh | sh
+# Windows (PowerShell)
+powershell -ExecutionPolicy Bypass -c "irm https://github.com/dakom/awsm-audio/releases/latest/download/awsm-audio-mcp-installer.ps1 | iex"
+# Homebrew (macOS / Linux)
+brew install dakom/tap/awsm-audio-mcp
+```
+
+From source: `cargo install --git https://github.com/dakom/awsm-audio awsm-audio-mcp`,
+or `task mcp:install` from a clone (builds release → `~/.cargo/bin`).
 
 ### Quick start
 
@@ -76,20 +94,13 @@ attached"*), and your **agent**. Set them up in that order:
    | Service | Address |
    | --- | --- |
    | Editor (Trunk) | `http://localhost:9170` |
-   | MCP + control HTTP | `http://127.0.0.1:9171` (`/mcp`, `/control`, `/debug`) |
-   | WebTransport link | UDP `9172` |
+   | MCP server (HTTP) | `http://127.0.0.1:9171` (`/mcp`, `/editor` ws, `/debug`, `/renders`) |
 
-   Or **install the server once** and run it from anywhere (no repo needed for the
-   server itself — you still run `task editor:dev` for the tab):
+   Or, with the server installed, just run `awsm-audio-mcp` from any directory
+   (defaults to port 9171) and `task editor:dev` for the tab.
 
-   ```bash
-   task mcp:install      # builds release, installs `awsm-audio-mcp` to ~/.cargo/bin
-   awsm-audio-mcp        # then run it from any directory (defaults to 9171/9172)
-   ```
-
-   > **Chrome only.** The link uses WebTransport `serverCertificateHashes`, which
-   > is Chromium-only. The dev cert is regenerated on every server start, so after
-   > restarting the server, reload the tab.
+   > Works in any modern browser — the link is a plain loopback WebSocket (no TLS,
+   > no certificate, no Chromium-only APIs).
 
 2. **Attach the editor** to the server: click the **MCP** button in the top bar,
    or load the editor with `?mcp=` to auto-connect:
@@ -125,6 +136,9 @@ default value, editable field keys, and a plain-language description). Then:
 
 - **Build** — `add_node`, `connect`, `set_field`, `remove_node`,
   `set_active_sample` (edit a sub-sample / instrument).
+- **Load samples** — `load_audio` brings an external WAV/mp3/flac (a local file
+  path *or* a URL) into an `audio_buffer_source` / `convolver` node. Bytes ride a
+  dedicated HTTP side-channel, never the editor link.
 - **Sequence / arrange** — `dispatch_command` with `edit_song` / `edit_control` /
   `edit_arrange`; `bounce`; `set_arrangement_markers` (loop/export region).
 - **Worklets** — author a crate against `awsm-audio-worklet`, `cargo build
@@ -137,7 +151,12 @@ default value, editable field keys, and a plain-language description). Then:
 
 Two MCP resources document the rest: `awsm-audio://docs/vocabulary` (the
 command/query JSON shapes) and `awsm-audio://docs/worklet-abi` (authoring a
-worklet). Full design + transport details: [docs/plans/MCP.md](docs/plans/MCP.md).
+worklet).
+
+> **Multiple tabs / agents.** With exactly one editor tab and one agent the two
+> auto-pair. When more than one of either is connected, the agent returns a short
+> **pairing code** — open the editor with `?mcp=…&pair=<code>` (or type the code
+> into the MCP connect modal) to bind that tab to that agent.
 
 ## Nodes
 
