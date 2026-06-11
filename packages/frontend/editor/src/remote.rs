@@ -65,8 +65,21 @@ pub enum RemoteStatus {
 /// flicker (and the user sees clearly when the agent has gone idle).
 const WORKING_COOLDOWN_MS: u32 = 450;
 
+/// Auto-reconnect backoff bounds. After a link that *was* live drops
+/// unexpectedly (laptop sleep/wake, wifi blip, the local server bouncing), the
+/// editor redials on its own — starting at [`RECONNECT_BACKOFF_START_MS`] and
+/// doubling up to [`RECONNECT_BACKOFF_MAX_MS`] so a genuinely-down server isn't
+/// hammered. The server holds no document state, and the binding re-resolves
+/// automatically in the 1-tab-1-agent case, so a redial cleanly re-attaches.
+const RECONNECT_BACKOFF_START_MS: u32 = 500;
+const RECONNECT_BACKOFF_MAX_MS: u32 = 10_000;
+
 thread_local! {
     static STATUS: Mutable<RemoteStatus> = Mutable::new(RemoteStatus::Disconnected);
+    /// Set to stop the auto-reconnect loop for good: a user-initiated
+    /// [`disconnect`], or a [`WsServerMsg::Detached`] takeover by another tab. An
+    /// unexpected drop leaves this `false`, so the loop redials.
+    static STOP_RETRY: Cell<bool> = const { Cell::new(false) };
     static ORIGIN: Mutable<String> = Mutable::new(normalize_origin(default_origin()));
     /// Pairing code to claim a specific agent (from `?pair=` or the modal). Empty
     /// unless the server needs disambiguation between multiple tabs/agents.
@@ -205,26 +218,60 @@ pub fn connect(control_origin: String) {
     let control_origin = normalize_origin(&control_origin);
     origin().set(control_origin.clone());
     status.set(RemoteStatus::Connecting);
+    STOP_RETRY.with(|f| f.set(false));
 
     spawn_local(async move {
-        let result = run(control_origin).await;
-        SESSION.with(|s| *s.borrow_mut() = None);
-        PAIRING_NEEDED.with(|n| n.set_neq(false));
-        activity_reset(); // never leave a stale "working" pulse after the link drops
-        let was_connected = status.get() == RemoteStatus::Connected;
-        status.set(RemoteStatus::Disconnected);
-        match (was_connected, result) {
-            // Dropped after a successful connect (server stopped, or user clicked
-            // disconnect) — informational, not an error.
-            (true, res) => {
-                if let Err(e) = res {
-                    tracing::warn!("mcp link ended: {e}");
-                }
-                toast("MCP disconnected");
+        let mut backoff = RECONNECT_BACKOFF_START_MS;
+        // True once we've had a live link this session. Distinguishes "the initial
+        // connect failed" (give up — don't hammer a wrong origin / absent server)
+        // from "a working link dropped" (self-heal by redialing).
+        let mut ever_connected = false;
+        let mut announced = false;
+        loop {
+            let result = run(control_origin.clone()).await;
+            SESSION.with(|s| *s.borrow_mut() = None);
+            PAIRING_NEEDED.with(|n| n.set_neq(false));
+            activity_reset(); // never leave a stale "working" pulse after a drop
+            if status.get() == RemoteStatus::Connected {
+                ever_connected = true;
+                backoff = RECONNECT_BACKOFF_START_MS;
+                announced = false;
             }
-            // Never got connected — the connect itself failed (server down, …).
-            (false, Err(e)) => toast(format!("MCP connect failed: {e}")),
-            (false, Ok(())) => {} // run() only returns Ok via the link closing
+
+            // Intentional stop (user disconnect, or a takeover by another tab).
+            if STOP_RETRY.with(|f| f.get()) {
+                status.set(RemoteStatus::Disconnected);
+                toast("MCP disconnected");
+                return;
+            }
+            // The very first connect never succeeded — report and stop; the user
+            // retries from the modal (avoids a silent retry-storm on a typo'd
+            // origin or a server that isn't running yet).
+            if !ever_connected {
+                status.set(RemoteStatus::Disconnected);
+                if let Err(e) = result {
+                    toast(format!("MCP connect failed: {e}"));
+                }
+                return;
+            }
+            // A live link dropped unexpectedly → redial with backoff until it
+            // comes back (or the user disconnects). run() re-toasts "MCP connected"
+            // when it heals.
+            if let Err(e) = result {
+                tracing::warn!("mcp link dropped: {e}");
+            }
+            status.set(RemoteStatus::Connecting);
+            if !announced {
+                toast("MCP connection lost — reconnecting…");
+                announced = true;
+            }
+            gloo_timers::future::TimeoutFuture::new(backoff).await;
+            if STOP_RETRY.with(|f| f.get()) {
+                status.set(RemoteStatus::Disconnected);
+                toast("MCP disconnected");
+                return;
+            }
+            backoff = (backoff * 2).min(RECONNECT_BACKOFF_MAX_MS);
         }
     });
 }
@@ -233,6 +280,8 @@ pub fn connect(control_origin: String) {
 /// when not connected. The "MCP disconnected" message is emitted by the connect
 /// task once `run` unwinds. Consumed by the connect UI.
 pub fn disconnect() {
+    // Stop the auto-reconnect loop (this is deliberate), then drop the link.
+    STOP_RETRY.with(|f| f.set(true));
     SESSION.with(|s| *s.borrow_mut() = None);
 }
 
@@ -324,6 +373,9 @@ async fn run(control_origin: String) -> Result<(), String> {
                         toast("MCP: enter the pairing code shown by your agent");
                     }
                     Ok(WsServerMsg::Detached) => {
+                        // Another tab took over this binding — don't fight for it
+                        // by reconnecting.
+                        STOP_RETRY.with(|f| f.set(true));
                         toast("MCP: detached (another tab paired)");
                         return Ok(());
                     }
