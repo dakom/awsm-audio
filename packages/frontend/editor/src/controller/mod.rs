@@ -184,6 +184,19 @@ pub struct EditorController {
     /// back via [`take_created_id`](Self::take_created_id) so a create command can
     /// return the minted id without a follow-up snapshot.
     created_id: Rc<RefCell<Option<String>>>,
+    /// Transient per-Sound render state for the bounce observability surface:
+    /// `Rendering` while an offline render is in flight, `Failed(msg)` if it
+    /// errored. Absent once a render lands cleanly (the stored bounce + hash then
+    /// say clean/dirty). Read by the `bounce_status` query so an agent can tell
+    /// *never bounced* from *currently rendering* from *render crashed*.
+    render_state: Rc<RefCell<std::collections::HashMap<awsm_audio_schema::SampleId, RenderState>>>,
+}
+
+/// In-flight / failed state of a Sound's offline render (see `render_state`).
+#[derive(Clone)]
+enum RenderState {
+    Rendering,
+    Failed(String),
 }
 
 /// A stored sample: its schema data plus per-node canvas layout (node ids are
@@ -317,6 +330,7 @@ impl EditorController {
             view: Mutable::new(awsm_audio_schema::SampleKind::Sound),
             status: Mutable::new(None),
             created_id: Rc::new(RefCell::new(None)),
+            render_state: Rc::new(RefCell::new(std::collections::HashMap::new())),
         };
         // Point active + root at the initial "main" sample.
         let id = ctrl.samples.borrow()[0].sample.id;
@@ -1411,8 +1425,9 @@ impl EditorController {
                     .collect(),
             ),
             EditorQuery::BounceStatus { sample } => {
-                QueryResult::BounceStatus(self.bounce_status(sample).as_str().to_string())
+                QueryResult::BounceStatus(self.bounce_status_str(sample))
             }
+            EditorQuery::RenderPlan { sample } => QueryResult::RenderPlan(self.render_plan(sample)),
             EditorQuery::Arrangement => QueryResult::Arrangement(self.active_arrangement()),
             EditorQuery::Transport => QueryResult::Transport(TransportInfo {
                 playing: self.playing.get(),
@@ -3134,6 +3149,20 @@ impl EditorController {
     }
 
     /// A Sound's bounce state (never / clean / stale).
+    /// The bounce status as a string for the read/query surface, enriched with the
+    /// transient render state: `"rendering"` while an offline render is in flight,
+    /// `"failed: <msg>"` if it crashed — otherwise the stored-bounce status
+    /// (`none` / `clean` / `dirty`). Lets an agent distinguish *never bounced*,
+    /// *currently rendering*, and *render crashed*.
+    pub fn bounce_status_str(&self, id: awsm_audio_schema::SampleId) -> String {
+        match self.render_state.borrow().get(&id) {
+            Some(RenderState::Rendering) => return "rendering".to_string(),
+            Some(RenderState::Failed(msg)) => return format!("failed: {msg}"),
+            None => {}
+        }
+        self.bounce_status(id).as_str().to_string()
+    }
+
     pub fn bounce_status(&self, id: awsm_audio_schema::SampleId) -> BounceStatus {
         let samples = self.samples.borrow();
         let Some(st) = samples.iter().find(|s| s.sample.id == id) else {
@@ -3174,6 +3203,81 @@ impl EditorController {
     /// [`export_active_wav`](Self::export_active_wav). Returns the job + the
     /// sample's display name, or `None` (setting a status message) when it can't
     /// render (an Arrangement, a live mic/stream source, or no player).
+    /// Extra render time past the loop so note release tails fold back onto the
+    /// loop start (sequencer-driven Sounds).
+    const RELEASE_TAIL: f64 = 3.0;
+    /// Default render window for a continuous / one-shot (non-sequencer) Sound,
+    /// when no `duration_secs` override is given.
+    const DEFAULT_GRAPH_SECS: f64 = 6.0;
+    /// Floor on any bounce length.
+    const MIN_BOUNCE_SECS: f64 = 0.25;
+
+    /// What an un-overridden [`bounce`](Self::bounce_sample) would render for Sound
+    /// `id`, and why — the queryable form of [`bounce_job_for`]'s duration logic
+    /// (kept in lockstep with it). Powers `get_render_plan` so the auto-duration
+    /// rules don't have to be reverse-engineered.
+    pub fn render_plan(
+        &self,
+        sample: Option<awsm_audio_schema::SampleId>,
+    ) -> awsm_audio_editor_protocol::RenderPlanInfo {
+        use awsm_audio_editor_protocol::RenderPlanInfo;
+        use awsm_audio_schema::{NodeKind, SampleKind};
+        let plain = |duration_secs: f64, reason: &str| RenderPlanInfo {
+            duration_secs,
+            is_sequence: false,
+            loop_secs: None,
+            reason: reason.to_string(),
+        };
+        self.commit_active();
+        let lib = self.to_library();
+        let id = sample.unwrap_or(*self.root.borrow());
+        let Some(sample) = lib.sample(id) else {
+            return plain(0.0, "no such sample");
+        };
+        if sample.kind == SampleKind::Arrangement {
+            return plain(
+                0.0,
+                "arrangement: renders its clip timeline (or the loop/export markers), not a fixed window",
+            );
+        }
+        let has_live_source = sample.graph.nodes.iter().any(|n| {
+            matches!(
+                n.kind,
+                NodeKind::MediaStreamSource(_) | NodeKind::MediaElementSource(_)
+            )
+        });
+        if has_live_source {
+            return plain(0.0, "not renderable offline: has a live mic / stream source");
+        }
+        if awsm_audio_player::document::is_sequence(&sample.graph) {
+            let sp = awsm_audio_player::document::sequence_parts(&lib, id);
+            let loop_len = sp.loop_secs.max(0.05);
+            let duration = (loop_len + Self::RELEASE_TAIL).max(Self::MIN_BOUNCE_SECS);
+            RenderPlanInfo {
+                duration_secs: duration,
+                is_sequence: true,
+                loop_secs: Some(loop_len),
+                reason: format!(
+                    "sequencer-driven: renders the {loop_len:.3}s song loop + a \
+                     {:.1}s release tail. Pass duration_secs to override.",
+                    Self::RELEASE_TAIL
+                ),
+            }
+        } else {
+            RenderPlanInfo {
+                duration_secs: Self::DEFAULT_GRAPH_SECS.max(Self::MIN_BOUNCE_SECS),
+                is_sequence: false,
+                loop_secs: None,
+                reason: format!(
+                    "continuous / one-shot graph (no sequencer wired into the audible \
+                     path): renders a fixed {:.1}s default window. Pass duration_secs \
+                     to capture a specific span.",
+                    Self::DEFAULT_GRAPH_SECS
+                ),
+            }
+        }
+    }
+
     fn bounce_job_for(
         &self,
         id: awsm_audio_schema::SampleId,
@@ -3206,7 +3310,6 @@ impl EditorController {
         // exact loop region (so a looping clip repeats bit-for-bit); the render
         // runs `RELEASE_TAIL` longer so note tails can be folded back onto the
         // loop start. A non-sequence Sound renders as a one-shot.
-        const RELEASE_TAIL: f64 = 3.0;
         let song = awsm_audio_player::document::is_sequence(&sample.graph);
         let (graph, parts, control, duration, loop_secs) = if song {
             let sp = awsm_audio_player::document::sequence_parts(&lib, id);
@@ -3215,7 +3318,7 @@ impl EditorController {
                 sp.graph,
                 sp.triggers,
                 sp.control,
-                loop_len + RELEASE_TAIL,
+                loop_len + Self::RELEASE_TAIL,
                 Some(loop_len),
             )
         } else {
@@ -3223,7 +3326,7 @@ impl EditorController {
                 awsm_audio_schema::flatten(&lib, id),
                 Vec::new(),
                 Vec::new(),
-                6.0,
+                Self::DEFAULT_GRAPH_SECS,
                 None,
             )
         };
@@ -3234,7 +3337,7 @@ impl EditorController {
             graph,
             parts,
             control,
-            duration.max(0.25),
+            duration.max(Self::MIN_BOUNCE_SECS),
             loop_secs,
         );
         Some((job, sample.name.clone()))
@@ -3310,9 +3413,13 @@ impl EditorController {
         let hash = self.deep_source_hash(id);
         let ctrl = self.clone();
         self.status.set(Some(format!("Bouncing “{name}”…")));
+        self.render_state
+            .borrow_mut()
+            .insert(id, RenderState::Rendering);
         wasm_bindgen_futures::spawn_local(async move {
             match awsm_audio_player::bounce::render(job).await {
                 Ok((channels, sr)) => {
+                    ctrl.render_state.borrow_mut().remove(&id);
                     let asset_id = awsm_audio_schema::AssetId::new();
                     let asset = BufferAsset {
                         id: asset_id,
@@ -3343,7 +3450,11 @@ impl EditorController {
                 }
                 Err(e) => {
                     tracing::error!("bounce failed: {e}");
+                    ctrl.render_state
+                        .borrow_mut()
+                        .insert(id, RenderState::Failed(e.to_string()));
                     ctrl.status.set(Some(format!("Bounce failed: {e}")));
+                    ctrl.samples_rev.replace_with(|r| r.wrapping_add(1));
                 }
             }
         });

@@ -25,6 +25,12 @@ pub enum EditorQuery {
     Assets,
     /// One Sound's bounce status.
     BounceStatus { sample: SampleId },
+    /// The auto-computed render length for a Sound (and *why*), so the surprising
+    /// duration rules are queryable before bouncing. `None` = the project root.
+    RenderPlan {
+        #[serde(default)]
+        sample: Option<SampleId>,
+    },
     /// The active sample's arrangement (if it is one).
     Arrangement,
     /// Live transport state (playing / peak / playhead / audio-context state).
@@ -62,6 +68,7 @@ pub enum QueryResult {
     Samples(Vec<SampleInfo>),
     Assets(Vec<AssetInfo>),
     BounceStatus(String),
+    RenderPlan(RenderPlanInfo),
     Arrangement(Option<Arrangement>),
     Transport(TransportInfo),
     WavStats(WavStats),
@@ -148,6 +155,25 @@ pub struct AssetInfo {
     /// `"none"` / `"clean"` / `"dirty"`.
     pub bounce: String,
     pub duration_secs: Option<f64>,
+}
+
+/// What `bounce` / `render_wav` would render for a Sound, and why — so the
+/// auto-duration rules (the single most surprising part of the system) are
+/// inspectable up front instead of reverse-engineered.
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RenderPlanInfo {
+    /// The length (seconds) an un-overridden bounce will render.
+    pub duration_secs: f64,
+    /// Whether the Sound is sequencer-driven (renders its song-loop length) vs a
+    /// continuous/one-shot graph (renders a fixed default window).
+    pub is_sequence: bool,
+    /// If sequencer-driven, the loop length (seconds) the render repeats.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub loop_secs: Option<f64>,
+    /// Plain-language explanation of how `duration_secs` was derived, and how to
+    /// override it (`duration_secs` on bounce/render_wav).
+    pub reason: String,
 }
 
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]

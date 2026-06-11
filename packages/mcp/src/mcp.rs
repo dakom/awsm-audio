@@ -107,6 +107,37 @@ pub struct AddNodeParams {
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct AddChainParams {
+    /// The node kinds to create, source → … → sink, each auto-connected to the
+    /// next (output 0 → input 0). A NodeKind value or a bare kind-name string —
+    /// e.g. `["oscillator", "biquad_filter", "gain"]`, or full
+    /// `{"kind":"…","props":{…}}` values from `list_node_kinds`.
+    pub kinds: Vec<Flexible<NodeKind>>,
+    /// World x of the first node (each subsequent node is offset by `spacing`).
+    #[serde(default)]
+    pub x: f64,
+    /// World y (shared by the row).
+    #[serde(default)]
+    pub y: f64,
+    /// Horizontal gap between nodes. Defaults to 180.
+    #[serde(default)]
+    pub spacing: Option<f64>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct RefBatchParams {
+    /// EditorCommands applied in order in one round-trip, with **symbolic refs**:
+    /// each command is the usual `{"cmd":…,"args":…}` object plus an optional
+    /// `"ref":"<name>"` that labels the id it mints. Any later command can use
+    /// `"$<name>"` anywhere an id is expected and it's substituted with the real
+    /// id before dispatch — so a create-then-connect flow is one tool call:
+    /// `[{"cmd":"add_node","ref":"osc","args":{…}},
+    ///   {"cmd":"add_node","ref":"amp","args":{…}},
+    ///   {"cmd":"connect","args":{"from":"$osc","to":"$amp"}}]`.
+    pub commands: Vec<serde_json::Value>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct ConnectParams {
     /// Source node id.
     pub from: NodeId,
@@ -388,13 +419,31 @@ impl EditorMcp {
         self.query(EditorQuery::Transport).await
     }
 
-    #[tool(description = "One Sound's bounce status (none / clean / dirty).")]
+    #[tool(description = "One Sound's bounce status: none (never bounced) / \
+        clean / dirty (stale) / rendering (in flight) / 'failed: <msg>' (the last \
+        render crashed — msg names the offending node).")]
     async fn get_bounce_status(
         &self,
         Parameters(p): Parameters<SampleReq>,
     ) -> Result<CallToolResult, McpError> {
         self.query(EditorQuery::BounceStatus { sample: p.sample })
             .await
+    }
+
+    #[tool(
+        description = "How long an un-overridden bounce / render_wav will render a \
+        Sound, and WHY — the queryable form of the (surprising) auto-duration \
+        rules: a sequencer-driven Sound renders its song-loop length + release \
+        tail; a continuous/one-shot graph renders a fixed default window. Returns \
+        {duration_secs, is_sequence, loop_secs?, reason}. Call this before bouncing \
+        a procedural source to decide whether you need a `duration_secs` override. \
+        Omit `sample` for the project root."
+    )]
+    async fn get_render_plan(
+        &self,
+        Parameters(p): Parameters<SampleArg>,
+    ) -> Result<CallToolResult, McpError> {
+        self.query(EditorQuery::RenderPlan { sample: p.sample }).await
     }
 
     // ── audio readback (the WAV surface) ─────────────────────────────────────
@@ -420,8 +469,9 @@ impl EditorMcp {
     }
 
     #[tool(description = "Cheap numeric stats of a Sound's offline render: \
-        duration_secs, peak, rms, channels, sample_rate. Omit `sample` for the \
-        root.")]
+        duration_secs, peak, rms, channels, sample_rate. Always a FRESH offline \
+        render of the current graph (never the stored `bounce`), so it reflects \
+        un-bounced edits. Omit `sample` for the root.")]
     async fn wav_stats(
         &self,
         Parameters(p): Parameters<SampleArg>,
@@ -431,8 +481,9 @@ impl EditorMcp {
 
     #[tool(
         description = "A downsampled min/max envelope (`buckets` columns) of a \
-        Sound's render, so you can reason about the waveform shape in text. Omit \
-        `sample` for the root."
+        Sound's render, so you can reason about the waveform shape in text. Always \
+        a FRESH offline render of the current graph (never the stored `bounce`). \
+        Omit `sample` for the root."
     )]
     async fn waveform(
         &self,
@@ -491,6 +542,58 @@ impl EditorMcp {
             y: p.y,
         })
         .await
+    }
+
+    #[tool(
+        description = "Create a linear chain of nodes (source → … → sink) in one \
+        call, auto-connecting each output 0 → the next input 0, and return all \
+        minted ids in order. Covers the common synth-patch shape \
+        (oscillator/noise → filter → gain → shaper → outlet). `kinds` are NodeKind \
+        values or bare kind-name strings. Returns `{ids:[…]}`; set_field on any id \
+        afterward to shape it. For non-linear graphs use dispatch_refs."
+    )]
+    async fn add_chain(
+        &self,
+        Parameters(p): Parameters<AddChainParams>,
+    ) -> Result<CallToolResult, McpError> {
+        if p.kinds.is_empty() {
+            return Err(McpError::invalid_params("kinds must be non-empty", None));
+        }
+        let spacing = p.spacing.unwrap_or(180.0);
+        // Create each node, capturing its minted id (needed to wire the chain).
+        let mut ids: Vec<String> = Vec::with_capacity(p.kinds.len());
+        for (i, kind) in p.kinds.into_iter().enumerate() {
+            let id = self
+                .dispatch_created(EditorCommand::AddNode {
+                    kind: kind.0,
+                    x: p.x + i as f64 * spacing,
+                    y: p.y,
+                })
+                .await?
+                .ok_or_else(|| {
+                    McpError::internal_error("add_node did not return a node id", None)
+                })?;
+            ids.push(id);
+        }
+        // Wire consecutive nodes (output 0 → input 0) in one batch.
+        let mut connects: Vec<EditorCommand> = Vec::new();
+        for w in ids.windows(2) {
+            let (from, to) = (parse_node_id(&w[0])?, parse_node_id(&w[1])?);
+            connects.push(EditorCommand::Connect {
+                from,
+                from_output: 0,
+                to,
+                to_input: 0,
+            });
+        }
+        if !connects.is_empty() {
+            match self.req(Request::DispatchBatch(connects)).await? {
+                Response::Batch(_) | Response::Ok => {}
+                Response::Err(e) => return Err(McpError::internal_error(e, None)),
+                other => return Err(unexpected(other)),
+            }
+        }
+        Ok(text(serde_json::json!({ "ids": ids }).to_string()))
     }
 
     #[tool(description = "Remove a node and every wire touching it.")]
@@ -567,6 +670,14 @@ impl EditorMcp {
                     "bounce complete (status: clean) for {}",
                     p.sample
                 )));
+            }
+            // Fail fast instead of waiting out the timeout when the render crashed
+            // (e.g. an offline-unsupported node). The status names the offender.
+            if status.starts_with("failed") {
+                return Err(McpError::internal_error(
+                    format!("bounce {status} for {}", p.sample),
+                    None,
+                ));
             }
             if start.elapsed() >= timeout {
                 return Ok(text(format!(
@@ -1124,6 +1235,49 @@ impl EditorMcp {
     }
 
     #[tool(
+        description = "Dispatch a batch of EditorCommands in order with symbolic \
+        id refs, so a create-then-connect flow is one tool call. Each command may \
+        carry a `\"ref\":\"<name>\"` labeling the id it creates; later commands use \
+        `\"$<name>\"` wherever an id is expected and it's replaced with the real \
+        minted id before dispatch. Returns the `{refs:{name:id}, results:[…]}` map. \
+        Use this instead of dispatch_batch when later commands reference earlier \
+        nodes; use add_chain for the simple linear case."
+    )]
+    async fn dispatch_refs(
+        &self,
+        Parameters(p): Parameters<RefBatchParams>,
+    ) -> Result<CallToolResult, McpError> {
+        if p.commands.is_empty() {
+            return Err(McpError::invalid_params(
+                "commands must be non-empty",
+                None,
+            ));
+        }
+        let mut refs: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+        let mut results: Vec<Value> = Vec::with_capacity(p.commands.len());
+        for (i, mut raw) in p.commands.into_iter().enumerate() {
+            // Pull the optional `ref` label off the command object.
+            let ref_name = raw
+                .as_object_mut()
+                .and_then(|o| o.remove("ref"))
+                .and_then(|v| v.as_str().map(str::to_string));
+            // Substitute `$name` → captured id anywhere in the command.
+            substitute_refs(&mut raw, &refs);
+            let cmd: EditorCommand = serde_json::from_value(raw).map_err(|e| {
+                McpError::invalid_params(format!("command {i}: {e}"), None)
+            })?;
+            let id = self.dispatch_created(cmd).await?;
+            if let (Some(name), Some(id)) = (&ref_name, &id) {
+                refs.insert(name.clone(), id.clone());
+            }
+            results.push(serde_json::json!({ "ok": true, "ref": ref_name, "id": id }));
+        }
+        Ok(text(
+            serde_json::json!({ "refs": refs, "results": results }).to_string(),
+        ))
+    }
+
+    #[tool(
         description = "Run any EditorQuery (escape hatch for queries without a \
         dedicated tool). The param schema documents every query + its args."
     )]
@@ -1164,6 +1318,17 @@ impl EditorMcp {
             Response::Created { id } => Ok(text(
                 serde_json::json!({ "ok": true, "id": id }).to_string(),
             )),
+            Response::Err(e) => Err(McpError::internal_error(e, None)),
+            other => Err(unexpected(other)),
+        }
+    }
+
+    /// Dispatch one command and return the id it minted (if it created a
+    /// node/sample/boundary/sample-ref), for the chain/ref builders.
+    async fn dispatch_created(&self, cmd: EditorCommand) -> Result<Option<String>, McpError> {
+        match self.req(Request::Dispatch(cmd)).await? {
+            Response::Created { id } => Ok(Some(id)),
+            Response::Ok => Ok(None),
             Response::Err(e) => Err(McpError::internal_error(e, None)),
             other => Err(unexpected(other)),
         }
@@ -1720,6 +1885,30 @@ fn content_type_for(path: &str) -> String {
 
 fn unexpected(resp: Response) -> McpError {
     McpError::internal_error(format!("unexpected response: {resp:?}"), None)
+}
+
+/// Parse a uuid string into a [`NodeId`] (for wiring returned chain ids).
+fn parse_node_id(s: &str) -> Result<NodeId, McpError> {
+    s.parse::<NodeId>()
+        .map_err(|e| McpError::internal_error(format!("bad node id {s}: {e}"), None))
+}
+
+/// Recursively replace any `"$name"` string in `v` with `map["name"]` — the
+/// symbolic-id substitution behind `dispatch_refs`. A `$name` with no matching
+/// ref is left as-is (it will surface as a deserialize error downstream).
+fn substitute_refs(v: &mut Value, map: &std::collections::HashMap<String, String>) {
+    match v {
+        Value::String(s) => {
+            if let Some(name) = s.strip_prefix('$') {
+                if let Some(id) = map.get(name) {
+                    *s = id.clone();
+                }
+            }
+        }
+        Value::Array(a) => a.iter_mut().for_each(|x| substitute_refs(x, map)),
+        Value::Object(o) => o.values_mut().for_each(|x| substitute_refs(x, map)),
+        _ => {}
+    }
 }
 
 fn unexpected_query(qr: QueryResult) -> McpError {
