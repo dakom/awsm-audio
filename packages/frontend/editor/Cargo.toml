@@ -61,6 +61,8 @@ features = [
     "FileList",
     "Blob",
     "Url",
+    # Copy-to-clipboard buttons (e.g. install commands in the Help modal).
+    "Clipboard",
     # File System Access API — directory-based projects (Chromium-only; gated
     # behind the workspace's `web_sys_unstable_apis` cfg).
     "DirectoryPickerOptions",

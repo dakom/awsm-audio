@@ -4,6 +4,7 @@
 
 use dominator::{clone, events, html, Dom};
 use futures_signals::signal::{Mutable, SignalExt};
+use wasm_bindgen_futures::spawn_local;
 
 use crate::controller::controller;
 
@@ -567,9 +568,28 @@ fn section(heading: &str, items: Vec<&'static str>) -> Dom {
 /// URLs, config); a leading "•" indents as a bullet; anything else is prose.
 fn paragraph(t: &'static str) -> Dom {
     if let Some(code) = t.strip_prefix("$ ") {
-        return html!("pre", {
-            .style("margin", "4px 0 8px")
-            .style("padding", "8px 11px")
+        return code_block(code);
+    }
+    html!("p", {
+        .style("margin", "0 0 5px")
+        .style("color", "var(--text-1)")
+        .style("padding-left", if t.starts_with('•') { "10px" } else { "0" })
+        .text(t)
+    })
+}
+
+/// A copyable code block: the monospaced command/URL plus a clipboard button in
+/// its top-right corner that writes the text to the OS clipboard (the commands
+/// are long and awkward to select by hand). The button flashes ✓ on success.
+fn code_block(code: &'static str) -> Dom {
+    let copied = Mutable::new(false);
+    html!("div", {
+        .style("position", "relative")
+        .style("margin", "4px 0 8px")
+        .child(html!("pre", {
+            .style("margin", "0")
+            // Extra right padding so long lines don't run under the copy button.
+            .style("padding", "8px 40px 8px 11px")
             .style("background", "var(--bg-1)")
             .style("border", "1px solid var(--line)")
             .style("border-radius", "6px")
@@ -582,12 +602,47 @@ fn paragraph(t: &'static str) -> Dom {
             .style("user-select", "all")
             .style_unchecked("-webkit-user-select", "all")
             .text(code)
+        }))
+        .child(html!("button", {
+            .style("position", "absolute")
+            .style("top", "6px")
+            .style("right", "6px")
+            .style("display", "inline-flex")
+            .style("align-items", "center")
+            .style("justify-content", "center")
+            .style("width", "26px")
+            .style("height", "26px")
+            .style("padding", "0")
+            .style("cursor", "pointer")
+            .style("border-radius", "5px")
+            .style("background", "var(--bg-2)")
+            .style("border", "1px solid var(--line)")
+            .style("font-size", "13px")
+            .style("line-height", "1")
+            .style_signal("color", copied.signal().map(|c| {
+                if c { "var(--accent-bright)".to_string() } else { "var(--text-2)".to_string() }
+            }))
+            .attr("title", "Copy to clipboard")
+            .text_signal(copied.signal().map(|c| if c { "✓" } else { "📋" }))
+            .event(clone!(copied => move |_: events::Click| {
+                copy_to_clipboard(code);
+                copied.set(true);
+                spawn_local(clone!(copied => async move {
+                    gloo_timers::future::TimeoutFuture::new(1200).await;
+                    copied.set(false);
+                }));
+            }))
+        }))
+    })
+}
+
+/// Write `text` to the OS clipboard (fire-and-forget; the returned promise is
+/// driven to completion so the browser doesn't log an unhandled rejection).
+fn copy_to_clipboard(text: &str) {
+    if let Some(win) = web_sys::window() {
+        let promise = win.navigator().clipboard().write_text(text);
+        spawn_local(async move {
+            let _ = wasm_bindgen_futures::JsFuture::from(promise).await;
         });
     }
-    html!("p", {
-        .style("margin", "0 0 5px")
-        .style("color", "var(--text-1)")
-        .style("padding-left", if t.starts_with('•') { "10px" } else { "0" })
-        .text(t)
-    })
 }
