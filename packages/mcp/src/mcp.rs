@@ -556,7 +556,8 @@ impl EditorMcp {
         &self,
         Parameters(p): Parameters<SampleArg>,
     ) -> Result<CallToolResult, McpError> {
-        self.query(EditorQuery::RenderPlan { sample: p.sample }).await
+        self.query(EditorQuery::RenderPlan { sample: p.sample })
+            .await
     }
 
     // ── audio readback (the WAV surface) ─────────────────────────────────────
@@ -740,9 +741,11 @@ impl EditorMcp {
         .await
     }
 
-    #[tool(description = "Set a node setting (the SetField command). `value` may be \
+    #[tool(
+        description = "Set a node setting (the SetField command). `value` may be \
         a number (most fields), a string (a choice/text field like an oscillator \
-        `type`), or a bool — the field type is inferred from the JSON value.")]
+        `type`), or a bool — the field type is inferred from the JSON value."
+    )]
     async fn set_field(
         &self,
         Parameters(p): Parameters<SetFieldParams>,
@@ -1497,8 +1500,7 @@ impl EditorMcp {
             // add_node / add_sample / add_boundary / add_sample_ref) so a
             // create-then-connect flow needs no follow-up snapshot.
             Response::Batch(items) => Ok(text(
-                serde_json::to_string(&items)
-                    .unwrap_or_else(|e| format!("{{\"error\":\"{e}\"}}")),
+                serde_json::to_string(&items).unwrap_or_else(|e| format!("{{\"error\":\"{e}\"}}")),
             )),
             Response::Ok => Ok(text("ok")),
             Response::Err(e) => Err(McpError::internal_error(e, None)),
@@ -1520,10 +1522,7 @@ impl EditorMcp {
         Parameters(p): Parameters<RefBatchParams>,
     ) -> Result<CallToolResult, McpError> {
         if p.commands.is_empty() {
-            return Err(McpError::invalid_params(
-                "commands must be non-empty",
-                None,
-            ));
+            return Err(McpError::invalid_params("commands must be non-empty", None));
         }
         let mut refs: std::collections::HashMap<String, String> = std::collections::HashMap::new();
         let mut results: Vec<Value> = Vec::with_capacity(p.commands.len());
@@ -1535,9 +1534,8 @@ impl EditorMcp {
                 .and_then(|v| v.as_str().map(str::to_string));
             // Substitute `$name` → captured id anywhere in the command.
             substitute_refs(&mut raw, &refs);
-            let cmd: EditorCommand = serde_json::from_value(raw).map_err(|e| {
-                McpError::invalid_params(format!("command {i}: {e}"), None)
-            })?;
+            let cmd: EditorCommand = serde_json::from_value(raw)
+                .map_err(|e| McpError::invalid_params(format!("command {i}: {e}"), None))?;
             let id = self.dispatch_created(cmd).await?;
             if let (Some(name), Some(id)) = (&ref_name, &id) {
                 refs.insert(name.clone(), id.clone());
@@ -1646,7 +1644,10 @@ impl EditorMcp {
             }
         }
         Err(McpError::invalid_params(
-            format!("no output key '{key}' on node {from}; available: {}", keys.join(", ")),
+            format!(
+                "no output key '{key}' on node {from}; available: {}",
+                keys.join(", ")
+            ),
             None,
         ))
     }
@@ -1675,9 +1676,10 @@ impl EditorMcp {
     async fn arrangement_bpm(&self) -> Result<f64, McpError> {
         match self.query_result(EditorQuery::Arrangement).await? {
             QueryResult::Arrangement(Some(a)) if a.bpm > 0.0 => Ok(a.bpm),
-            QueryResult::Arrangement(Some(_)) => {
-                Err(McpError::internal_error("arrangement BPM is not positive", None))
-            }
+            QueryResult::Arrangement(Some(_)) => Err(McpError::internal_error(
+                "arrangement BPM is not positive",
+                None,
+            )),
             QueryResult::Arrangement(None) => Err(McpError::invalid_params(
                 "active sample is not an arrangement — set_active_sample to one first",
                 None,

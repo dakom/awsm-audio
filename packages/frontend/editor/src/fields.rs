@@ -394,8 +394,7 @@ pub fn apply(kind: &mut NodeKind, key: &str, value: &FieldValue) {
             "seed" => {
                 if let Some(v) = n() {
                     // Clamp to the TOML-savable range (see `NoiseNode::seed`).
-                    nz.seed =
-                        (v.max(0.0) as u64).min(awsm_audio_schema::MAX_NOISE_SEED)
+                    nz.seed = (v.max(0.0) as u64).min(awsm_audio_schema::MAX_NOISE_SEED)
                 }
             }
             "seconds" => {

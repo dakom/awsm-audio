@@ -1436,9 +1436,7 @@ impl EditorController {
             EditorQuery::Arrangement => QueryResult::Arrangement(self.active_arrangement()),
             // Served on the async render branch in `remote.rs` (it renders each
             // track); this sync path is never reached for it.
-            EditorQuery::ArrangementTrackStats => {
-                QueryResult::ArrangementTrackStats(Vec::new())
-            }
+            EditorQuery::ArrangementTrackStats => QueryResult::ArrangementTrackStats(Vec::new()),
             EditorQuery::Transport => QueryResult::Transport(TransportInfo {
                 playing: self.playing.get(),
                 peak: self.audio_peak(),
@@ -3257,7 +3255,10 @@ impl EditorController {
             )
         });
         if has_live_source {
-            return plain(0.0, "not renderable offline: has a live mic / stream source");
+            return plain(
+                0.0,
+                "not renderable offline: has a live mic / stream source",
+            );
         }
         if awsm_audio_player::document::is_sequence(&sample.graph) {
             let sp = awsm_audio_player::document::sequence_parts(&lib, id);
@@ -3384,10 +3385,7 @@ impl EditorController {
     /// The decoded PCM of a Sound's stored bounce, if it has one backed by inline
     /// PCM (the normal case for a bounce). `None` for an un-bounced sample or a
     /// non-PCM asset source.
-    fn stored_bounce_pcm(
-        &self,
-        id: awsm_audio_schema::SampleId,
-    ) -> Option<(Vec<Vec<f32>>, u32)> {
+    fn stored_bounce_pcm(&self, id: awsm_audio_schema::SampleId) -> Option<(Vec<Vec<f32>>, u32)> {
         let asset_id = {
             let samples = self.samples.borrow();
             samples
@@ -3497,10 +3495,7 @@ impl EditorController {
                 // (solo it, clear others, force-unmute it) so audio_clip_parts —
                 // which honors mute/solo — yields just this stem.
                 let mut lib = base_lib.clone();
-                if let Some(a) = lib
-                    .sample_mut(id)
-                    .map(|s| &mut s.arrangement)
-                {
+                if let Some(a) = lib.sample_mut(id).map(|s| &mut s.arrangement) {
                     for (i, tr) in a.tracks.iter_mut().enumerate() {
                         tr.solo = i == t;
                         if i == t {
@@ -3512,10 +3507,14 @@ impl EditorController {
                 if clips.is_empty() {
                     (0.0, 0.0)
                 } else {
-                    let (channels, rate) =
-                        awsm_audio_player::bounce::render_clips(clips, buffers.clone(), sr, duration)
-                            .await
-                            .map_err(|e| format!("{e}"))?;
+                    let (channels, rate) = awsm_audio_player::bounce::render_clips(
+                        clips,
+                        buffers.clone(),
+                        sr,
+                        duration,
+                    )
+                    .await
+                    .map_err(|e| format!("{e}"))?;
                     let s = WavStats::from_pcm(&channels, rate);
                     (s.peak, s.rms)
                 }

@@ -427,9 +427,7 @@ async fn serve_one(id: u64, req: Request) {
         Request::LoadAudio { node, url, label } => load_audio(node, url, label).await,
         Request::Query(EditorQuery::ArrangementTrackStats) => {
             match controller().arrangement_track_stats().await {
-                Ok(stats) => {
-                    Response::Query(Box::new(QueryResult::ArrangementTrackStats(stats)))
-                }
+                Ok(stats) => Response::Query(Box::new(QueryResult::ArrangementTrackStats(stats))),
                 Err(e) => Response::Err(e),
             }
         }
