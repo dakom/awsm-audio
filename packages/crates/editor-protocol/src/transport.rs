@@ -145,12 +145,36 @@ pub struct AudioInfo {
     pub channels: usize,
 }
 
+/// Per-command outcome inside a [`Response::Batch`] — mirrors the order of the
+/// dispatched [`Request::DispatchBatch`] list, so an agent can see which command
+/// created what (and which one failed) without a follow-up snapshot.
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BatchItemResult {
+    /// Did this command apply? (The editor's `dispatch` is infallible, so this is
+    /// `false` only for a command rejected before dispatch.)
+    pub ok: bool,
+    /// The uuid of the node / sample / boundary / sample-ref this command created,
+    /// if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    /// A human-readable reason this command failed, if `ok` is false.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
 /// Editor → server. The reply to a [`Request`].
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Response {
     /// A mutation / control op succeeded with no payload.
     Ok,
+    /// A mutation succeeded and created a document object; carries its minted
+    /// uuid (a node / sample / boundary / sample-ref id) so the caller needn't
+    /// re-snapshot to learn it.
+    Created { id: String },
+    /// Per-command results for a [`Request::DispatchBatch`], in order.
+    Batch(Vec<BatchItemResult>),
     /// A query result (boxed — `QueryResult::Snapshot` is large).
     Query(Box<QueryResult>),
     /// A render reference. The `.wav` bytes were uploaded out-of-band (see

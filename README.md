@@ -73,12 +73,12 @@ Prebuilt binaries — no toolchain needed:
 
 ```bash
 # macOS / Linux
-curl --proto '=https' --tlsv1.2 -LsSf https://github.com/dakom/awsm-audio/releases/latest/download/awsm-audio-mcp-installer.sh | sh
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/awsm-fun/awsm-audio/releases/latest/download/awsm-audio-mcp-installer.sh | sh
 # Windows (PowerShell)
-powershell -ExecutionPolicy Bypass -c "irm https://github.com/dakom/awsm-audio/releases/latest/download/awsm-audio-mcp-installer.ps1 | iex"
+powershell -ExecutionPolicy Bypass -c "irm https://github.com/awsm-fun/awsm-audio/releases/latest/download/awsm-audio-mcp-installer.ps1 | iex"
 ```
 
-From source: `cargo install --git https://github.com/dakom/awsm-audio awsm-audio-mcp`,
+From source: `cargo install --git https://github.com/awsm-fun/awsm-audio awsm-audio-mcp`,
 or `task mcp:install` from a clone (builds release → `~/.cargo/bin`).
 
 (Maintainers: cutting a new release is one `git tag` — see

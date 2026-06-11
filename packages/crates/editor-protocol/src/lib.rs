@@ -22,12 +22,13 @@ pub use command::{ArrangeOp, ControlOp, EditorCommand, PlacedClip, SongOp};
 pub use field::FieldValue;
 pub use node::{BoundaryPort, ConnId, ConnSink};
 pub use query::{
-    AssetInfo, EditorQuery, FieldInfo, NodeKindInfo, QueryResult, SampleInfo, TransportInfo,
-    WavStats, WaveformEnvelope,
+    AssetInfo, EditorQuery, FieldInfo, NodeKindInfo, QueryResult, RenderPlanInfo, SampleInfo,
+    TrackStats, TransportInfo, WavStats, WaveformEnvelope,
 };
 pub use snapshot::{EditorProject, EditorSnapshot, NodeLayout};
 pub use transport::{
-    AudioInfo, EditorEvent, RenderHandle, Request, Response, WsClientMsg, WsServerMsg,
+    AudioInfo, BatchItemResult, EditorEvent, RenderHandle, Request, Response, WsClientMsg,
+    WsServerMsg,
 };
 
 #[cfg(test)]

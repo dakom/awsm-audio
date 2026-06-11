@@ -52,6 +52,11 @@ impl SampleLibrary {
     pub fn sample(&self, id: SampleId) -> Option<&Sample> {
         self.samples.iter().find(|s| s.id == id)
     }
+
+    /// Mutable lookup of a sample by id.
+    pub fn sample_mut(&mut self, id: SampleId) -> Option<&mut Sample> {
+        self.samples.iter_mut().find(|s| s.id == id)
+    }
 }
 
 fn default_version() -> u32 {

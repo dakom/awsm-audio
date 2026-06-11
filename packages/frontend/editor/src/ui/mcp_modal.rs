@@ -2,10 +2,11 @@
 //! [`status`](crate::remote::status), plus a connect modal (an editable origin +
 //! Connect). Mounted once in [`crate::ui`]; visible whenever [`OPEN`] is set.
 //!
-//! Disconnected → "MCP" opens the modal. Connecting → disabled spinner-ish label.
-//! Connected → "MCP ✓" disconnects on click. The origin pre-fills from
-//! [`remote::origin`](crate::remote::origin) (the `?mcp=` value or the baked
-//! [`default_origin`](crate::remote::default_origin)).
+//! The button *always* opens the modal (never a silent toggle): disconnected →
+//! "MCP" opens it to connect; connecting → disabled label; connected → "MCP ✓"
+//! opens it to show the live connection + an explicit Disconnect button. The
+//! origin pre-fills from [`remote::origin`](crate::remote::origin) (the `?mcp=`
+//! value or the baked [`default_origin`](crate::remote::default_origin)).
 
 use dominator::{clone, events, html, with_node, Dom};
 use futures_signals::map_ref;
@@ -63,8 +64,8 @@ fn status_button(status: RemoteStatus) -> Dom {
             .label("MCP ✓")
             .variant(BtnVariant::Primary)
             .size(BtnSize::Sm)
-            .title("Connected — click to disconnect")
-            .on_click(remote::disconnect)
+            .title("Connected — click for MCP connection options")
+            .on_click(|| open_state().set(true))
             .render(),
     }
 }
@@ -103,6 +104,53 @@ fn activity_chip(working: bool) -> Dom {
         .child(html!("span", { .text("🤖") }))
         .child(html!("span", { .text(if working { "working…" } else { "idle" }) }))
     })
+}
+
+/// The status-aware banner at the top of the modal body: a live "connected to
+/// <origin>" line (green dot) when attached, else the "how to connect" blurb.
+fn connection_banner(status: RemoteStatus, origin: String) -> Dom {
+    match status {
+        RemoteStatus::Connected => html!("div", {
+            .style("display", "flex")
+            .style("align-items", "center")
+            .style("gap", "8px")
+            .style("margin", "0 0 14px")
+            .style("padding", "9px 11px")
+            .style("border-radius", "8px")
+            .style("background", "oklch(0.7 0.15 150 / 0.12)")
+            .style("border", "1px solid oklch(0.7 0.15 150 / 0.4)")
+            .style("font-size", "13px")
+            .style("color", "var(--text-1)")
+            .child(html!("span", {
+                .style("width", "9px")
+                .style("height", "9px")
+                .style("border-radius", "50%")
+                .style("background", "oklch(0.72 0.17 150)")
+                .style("flex", "none")
+            }))
+            .child(html!("span", {
+                .child(html!("strong", { .text("Connected") }))
+                .child(html!("span", {
+                    .style("color", "var(--text-2)")
+                    .text(&format!(" to {origin}"))
+                }))
+            }))
+        }),
+        RemoteStatus::Connecting => html!("p", {
+            .style("margin", "0 0 14px")
+            .style("font-size", "13px")
+            .style("color", "var(--text-2)")
+            .text(&format!("Connecting to {origin}…"))
+        }),
+        RemoteStatus::Disconnected => html!("p", {
+            .style("margin", "0 0 14px")
+            .style("font-size", "13px")
+            .style("line-height", "1.5")
+            .style("color", "var(--text-2)")
+            .text("The editor dials out to a local MCP server over a WebSocket. \
+                   Start it with `task mcp:serve`, then connect to its control origin.")
+        }),
+    }
 }
 
 /// The connect modal overlay (mounted once; shown when [`OPEN`] is set).
@@ -192,15 +240,13 @@ fn view() -> Dom {
                         })
                         .render())
                 }))
-                .child(html!("p", {
-                    .style("margin", "0 0 14px")
-                    .style("font-size", "13px")
-                    .style("line-height", "1.5")
-                    .style("color", "var(--text-2)")
-                    .text("The editor dials out to a local MCP server over a \
-                           WebSocket. Start it with `task mcp:serve`, then \
-                           connect to its control origin.")
-                }))
+                // Status-aware banner: when connected, show the live origin + a
+                // green dot; otherwise the "how to connect" blurb.
+                .child_signal(map_ref! {
+                    let status = remote::status().signal(),
+                    let origin = remote::origin().signal_cloned() =>
+                    Some(connection_banner(*status, origin.clone()))
+                })
                 .child(html!("input" => web_sys::HtmlInputElement, {
                     .style("width", "100%")
                     .style("box-sizing", "border-box")
@@ -285,23 +331,47 @@ fn view() -> Dom {
                     }))
                     .text("Use TLS (wss/https) — for a server behind HTTPS")
                 }))
+                // Footer actions, reactive to the link status: when connected, an
+                // explicit Disconnect (so the button never silently toggles off);
+                // otherwise Connect.
                 .child(html!("div", {
                     .style("display", "flex")
                     .style("justify-content", "flex-end")
                     .style("gap", "8px")
                     .style("margin-top", "16px")
                     .child(Btn::new()
-                        .label("Cancel")
+                        .label("Close")
                         .variant(BtnVariant::Ghost)
                         .size(BtnSize::Sm)
                         .on_click(|| open_state().set(false))
                         .render())
-                    .child(Btn::new()
-                        .label("Connect")
-                        .variant(BtnVariant::Primary)
-                        .size(BtnSize::Sm)
-                        .on_click(clone!(submit => submit))
-                        .render())
+                    .child_signal(remote::status().signal().map(clone!(submit => move |status| {
+                        Some(match status {
+                            RemoteStatus::Connected => Btn::new()
+                                .label("Disconnect")
+                                .variant(BtnVariant::Danger)
+                                .size(BtnSize::Sm)
+                                .title("Drop the MCP link")
+                                .on_click(|| {
+                                    remote::disconnect();
+                                    open_state().set(false);
+                                })
+                                .render(),
+                            RemoteStatus::Connecting => Btn::new()
+                                .label("Connecting…")
+                                .variant(BtnVariant::Primary)
+                                .size(BtnSize::Sm)
+                                .disabled(true)
+                                .on_click(|| {})
+                                .render(),
+                            RemoteStatus::Disconnected => Btn::new()
+                                .label("Connect")
+                                .variant(BtnVariant::Primary)
+                                .size(BtnSize::Sm)
+                                .on_click(clone!(submit => submit))
+                                .render(),
+                        })
+                    })))
                 }))
             }))
         }))

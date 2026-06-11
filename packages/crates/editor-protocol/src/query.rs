@@ -25,21 +25,41 @@ pub enum EditorQuery {
     Assets,
     /// One Sound's bounce status.
     BounceStatus { sample: SampleId },
-    /// The active sample's arrangement (if it is one).
-    Arrangement,
-    /// Live transport state (playing / peak / playhead / audio-context state).
-    Transport,
-    /// Cheap numeric stats of a Sound's offline render.
-    WavStats {
+    /// The auto-computed render length for a Sound (and *why*), so the surprising
+    /// duration rules are queryable before bouncing. `None` = the project root.
+    RenderPlan {
         #[serde(default)]
         sample: Option<SampleId>,
     },
-    /// A downsampled min/max envelope (`buckets` columns) of a Sound's render,
-    /// so an agent can reason about the waveform shape in text.
+    /// The active sample's arrangement (if it is one).
+    Arrangement,
+    /// Per-track peak/rms of the active arrangement, each rendered in isolation
+    /// (solo) — so an agent can see which stem is hot without rescaling blindly.
+    ArrangementTrackStats,
+    /// Live transport state (playing / peak / playhead / audio-context state).
+    Transport,
+    /// Cheap numeric stats of a Sound. `bounced = false` (default) renders the
+    /// *live graph* fresh; `bounced = true` reports the *stored bounced asset*
+    /// (errors "not yet bounced" if there is none). `duration_secs` sets the
+    /// live-render window (ignored when `bounced`).
+    WavStats {
+        #[serde(default)]
+        sample: Option<SampleId>,
+        #[serde(default)]
+        bounced: bool,
+        #[serde(default)]
+        duration_secs: Option<f64>,
+    },
+    /// A downsampled min/max envelope (`buckets` columns) of a Sound. Same
+    /// `bounced` live-vs-stored choice as [`WavStats`](Self::WavStats).
     Waveform {
         #[serde(default)]
         sample: Option<SampleId>,
         buckets: u32,
+        #[serde(default)]
+        bounced: bool,
+        #[serde(default)]
+        duration_secs: Option<f64>,
     },
     /// The palette catalog: every creatable node kind with a ready-to-use default
     /// value and its editable field keys — so `add_node` / `set_field` need no
@@ -62,7 +82,9 @@ pub enum QueryResult {
     Samples(Vec<SampleInfo>),
     Assets(Vec<AssetInfo>),
     BounceStatus(String),
+    RenderPlan(RenderPlanInfo),
     Arrangement(Option<Arrangement>),
+    ArrangementTrackStats(Vec<TrackStats>),
     Transport(TransportInfo),
     WavStats(WavStats),
     Waveform(WaveformEnvelope),
@@ -130,7 +152,7 @@ pub struct SampleInfo {
     pub kind: SampleKind,
     pub is_root: bool,
     pub is_active: bool,
-    /// Bounce state for a Sound: `"none"` / `"clean"` / `"dirty"`. `None` for an
+    /// Bounce state for a Sound: `"none"` / `"clean"` / `"stale"`. `None` for an
     /// Arrangement (not bounceable). Mirrors `AssetInfo.bounce` so `list_samples`
     /// is a one-stop view.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -145,9 +167,43 @@ pub struct SampleInfo {
 pub struct AssetInfo {
     pub id: SampleId,
     pub name: String,
-    /// `"none"` / `"clean"` / `"dirty"`.
+    /// `"none"` / `"clean"` / `"stale"`.
     pub bounce: String,
     pub duration_secs: Option<f64>,
+}
+
+/// What `bounce` / `render_wav` would render for a Sound, and why — so the
+/// auto-duration rules (the single most surprising part of the system) are
+/// inspectable up front instead of reverse-engineered.
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RenderPlanInfo {
+    /// The length (seconds) an un-overridden bounce will render.
+    pub duration_secs: f64,
+    /// Whether the Sound is sequencer-driven (renders its song-loop length) vs a
+    /// continuous/one-shot graph (renders a fixed default window).
+    pub is_sequence: bool,
+    /// If sequencer-driven, the loop length (seconds) the render repeats.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub loop_secs: Option<f64>,
+    /// Plain-language explanation of how `duration_secs` was derived, and how to
+    /// override it (`duration_secs` on bounce/render_wav).
+    pub reason: String,
+}
+
+/// Peak/rms of one arrangement track, rendered in isolation — the per-stem mix
+/// readback behind `arrangement_track_stats`.
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TrackStats {
+    pub track: usize,
+    pub name: String,
+    /// Peak absolute sample of this track alone (>1.0 = it clips on its own).
+    pub peak: f32,
+    /// RMS level of this track alone.
+    pub rms: f32,
+    /// How many clips are on the track.
+    pub clips: usize,
 }
 
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
@@ -168,6 +224,9 @@ pub struct WavStats {
     pub rms: f32,
     pub channels: u32,
     pub sample_rate: u32,
+    /// True when `peak > 1.0` — the render clips (distorts) and needs the level
+    /// brought down. Saves the caller having to know that 1.0 is the ceiling.
+    pub clipping: bool,
 }
 
 impl WavStats {
@@ -202,6 +261,7 @@ impl WavStats {
             rms,
             channels: channels.len() as u32,
             sample_rate,
+            clipping: peak > 1.0,
         }
     }
 }

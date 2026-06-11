@@ -32,8 +32,8 @@ use wasm_bindgen_futures::spawn_local;
 
 use awsm_audio_editor_protocol::schema::SampleId;
 use awsm_audio_editor_protocol::{
-    EditorEvent, EditorQuery, QueryResult, RenderHandle, Request, Response, WavStats,
-    WaveformEnvelope, WsClientMsg, WsServerMsg,
+    BatchItemResult, EditorEvent, EditorQuery, QueryResult, RenderHandle, Request, Response,
+    WavStats, WaveformEnvelope, WsClientMsg, WsServerMsg,
 };
 
 use crate::controller::controller;
@@ -65,8 +65,21 @@ pub enum RemoteStatus {
 /// flicker (and the user sees clearly when the agent has gone idle).
 const WORKING_COOLDOWN_MS: u32 = 450;
 
+/// Auto-reconnect backoff bounds. After a link that *was* live drops
+/// unexpectedly (laptop sleep/wake, wifi blip, the local server bouncing), the
+/// editor redials on its own — starting at [`RECONNECT_BACKOFF_START_MS`] and
+/// doubling up to [`RECONNECT_BACKOFF_MAX_MS`] so a genuinely-down server isn't
+/// hammered. The server holds no document state, and the binding re-resolves
+/// automatically in the 1-tab-1-agent case, so a redial cleanly re-attaches.
+const RECONNECT_BACKOFF_START_MS: u32 = 500;
+const RECONNECT_BACKOFF_MAX_MS: u32 = 10_000;
+
 thread_local! {
     static STATUS: Mutable<RemoteStatus> = Mutable::new(RemoteStatus::Disconnected);
+    /// Set to stop the auto-reconnect loop for good: a user-initiated
+    /// [`disconnect`], or a [`WsServerMsg::Detached`] takeover by another tab. An
+    /// unexpected drop leaves this `false`, so the loop redials.
+    static STOP_RETRY: Cell<bool> = const { Cell::new(false) };
     static ORIGIN: Mutable<String> = Mutable::new(normalize_origin(default_origin()));
     /// Pairing code to claim a specific agent (from `?pair=` or the modal). Empty
     /// unless the server needs disambiguation between multiple tabs/agents.
@@ -205,26 +218,60 @@ pub fn connect(control_origin: String) {
     let control_origin = normalize_origin(&control_origin);
     origin().set(control_origin.clone());
     status.set(RemoteStatus::Connecting);
+    STOP_RETRY.with(|f| f.set(false));
 
     spawn_local(async move {
-        let result = run(control_origin).await;
-        SESSION.with(|s| *s.borrow_mut() = None);
-        PAIRING_NEEDED.with(|n| n.set_neq(false));
-        activity_reset(); // never leave a stale "working" pulse after the link drops
-        let was_connected = status.get() == RemoteStatus::Connected;
-        status.set(RemoteStatus::Disconnected);
-        match (was_connected, result) {
-            // Dropped after a successful connect (server stopped, or user clicked
-            // disconnect) — informational, not an error.
-            (true, res) => {
-                if let Err(e) = res {
-                    tracing::warn!("mcp link ended: {e}");
-                }
-                toast("MCP disconnected");
+        let mut backoff = RECONNECT_BACKOFF_START_MS;
+        // True once we've had a live link this session. Distinguishes "the initial
+        // connect failed" (give up — don't hammer a wrong origin / absent server)
+        // from "a working link dropped" (self-heal by redialing).
+        let mut ever_connected = false;
+        let mut announced = false;
+        loop {
+            let result = run(control_origin.clone()).await;
+            SESSION.with(|s| *s.borrow_mut() = None);
+            PAIRING_NEEDED.with(|n| n.set_neq(false));
+            activity_reset(); // never leave a stale "working" pulse after a drop
+            if status.get() == RemoteStatus::Connected {
+                ever_connected = true;
+                backoff = RECONNECT_BACKOFF_START_MS;
+                announced = false;
             }
-            // Never got connected — the connect itself failed (server down, …).
-            (false, Err(e)) => toast(format!("MCP connect failed: {e}")),
-            (false, Ok(())) => {} // run() only returns Ok via the link closing
+
+            // Intentional stop (user disconnect, or a takeover by another tab).
+            if STOP_RETRY.with(|f| f.get()) {
+                status.set(RemoteStatus::Disconnected);
+                toast("MCP disconnected");
+                return;
+            }
+            // The very first connect never succeeded — report and stop; the user
+            // retries from the modal (avoids a silent retry-storm on a typo'd
+            // origin or a server that isn't running yet).
+            if !ever_connected {
+                status.set(RemoteStatus::Disconnected);
+                if let Err(e) = result {
+                    toast(format!("MCP connect failed: {e}"));
+                }
+                return;
+            }
+            // A live link dropped unexpectedly → redial with backoff until it
+            // comes back (or the user disconnects). run() re-toasts "MCP connected"
+            // when it heals.
+            if let Err(e) = result {
+                tracing::warn!("mcp link dropped: {e}");
+            }
+            status.set(RemoteStatus::Connecting);
+            if !announced {
+                toast("MCP connection lost — reconnecting…");
+                announced = true;
+            }
+            gloo_timers::future::TimeoutFuture::new(backoff).await;
+            if STOP_RETRY.with(|f| f.get()) {
+                status.set(RemoteStatus::Disconnected);
+                toast("MCP disconnected");
+                return;
+            }
+            backoff = (backoff * 2).min(RECONNECT_BACKOFF_MAX_MS);
         }
     });
 }
@@ -233,6 +280,8 @@ pub fn connect(control_origin: String) {
 /// when not connected. The "MCP disconnected" message is emitted by the connect
 /// task once `run` unwinds. Consumed by the connect UI.
 pub fn disconnect() {
+    // Stop the auto-reconnect loop (this is deliberate), then drop the link.
+    STOP_RETRY.with(|f| f.set(true));
     SESSION.with(|s| *s.borrow_mut() = None);
 }
 
@@ -324,6 +373,9 @@ async fn run(control_origin: String) -> Result<(), String> {
                         toast("MCP: enter the pairing code shown by your agent");
                     }
                     Ok(WsServerMsg::Detached) => {
+                        // Another tab took over this binding — don't fight for it
+                        // by reconnecting.
+                        STOP_RETRY.with(|f| f.set(true));
                         toast("MCP: detached (another tab paired)");
                         return Ok(());
                     }
@@ -373,6 +425,12 @@ async fn serve_one(id: u64, req: Request) {
             label,
         } => attach_wasm(node, wasm_base64, label).await,
         Request::LoadAudio { node, url, label } => load_audio(node, url, label).await,
+        Request::Query(EditorQuery::ArrangementTrackStats) => {
+            match controller().arrangement_track_stats().await {
+                Ok(stats) => Response::Query(Box::new(QueryResult::ArrangementTrackStats(stats))),
+                Err(e) => Response::Err(e),
+            }
+        }
         Request::Query(q) if is_wav_query(&q) => render_query(q).await,
         req => dispatch(req),
     };
@@ -397,13 +455,26 @@ fn dispatch(req: Request) -> Response {
     match req {
         Request::Dispatch(cmd) => {
             ctrl.dispatch(cmd);
-            Response::Ok
+            // Echo a minted id (node / sample / boundary / sample-ref) so the
+            // caller doesn't need a follow-up snapshot to learn it.
+            match ctrl.take_created_id() {
+                Some(id) => Response::Created { id },
+                None => Response::Ok,
+            }
         }
         Request::DispatchBatch(cmds) => {
-            for c in cmds {
-                ctrl.dispatch(c);
-            }
-            Response::Ok
+            let items = cmds
+                .into_iter()
+                .map(|c| {
+                    ctrl.dispatch(c);
+                    BatchItemResult {
+                        ok: true,
+                        id: ctrl.take_created_id(),
+                        error: None,
+                    }
+                })
+                .collect();
+            Response::Batch(items)
         }
         Request::Query(q) => Response::Query(Box::new(ctrl.query(q))),
         Request::Play => {
@@ -477,13 +548,24 @@ async fn upload_render(render_id: &str, wav: Vec<u8>) -> Result<(), String> {
 /// Offline-render a Sound and compute the numeric `WavStats` / `Waveform`
 /// readback (the analog of the renderer's pixel readbacks).
 async fn render_query(q: EditorQuery) -> Response {
-    let (sample, want_waveform, buckets) = match &q {
-        EditorQuery::WavStats { sample } => (*sample, false, 0),
-        EditorQuery::Waveform { sample, buckets } => (*sample, true, *buckets),
+    let (sample, want_waveform, buckets, bounced, duration_secs) = match &q {
+        EditorQuery::WavStats {
+            sample,
+            bounced,
+            duration_secs,
+        } => (*sample, false, 0, *bounced, *duration_secs),
+        EditorQuery::Waveform {
+            sample,
+            buckets,
+            bounced,
+            duration_secs,
+        } => (*sample, true, *buckets, *bounced, *duration_secs),
         _ => unreachable!("render_query only handles the WAV queries"),
     };
     let ctrl = controller();
-    match ctrl.render_pcm(sample, None, None).await {
+    // bounced=false → live graph; bounced=true → stored bounced asset (see
+    // `readback_pcm`). The caller chose, so there's nothing to disambiguate here.
+    match ctrl.readback_pcm(sample, bounced, duration_secs).await {
         Ok((channels, rate)) => {
             let qr = if want_waveform {
                 QueryResult::Waveform(WaveformEnvelope::from_pcm(&channels, rate, buckets))

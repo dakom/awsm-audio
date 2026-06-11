@@ -230,6 +230,13 @@ impl Default for AudioBufferSourceNode {
 pub struct NoiseNode {
     pub flavor: NoiseFlavor,
     /// PRNG seed — same seed reproduces the exact texture.
+    ///
+    /// Clamped on deserialize to [`MAX_NOISE_SEED`] (`i64::MAX`). The seed is
+    /// opaque entropy, but the authored on-disk format is TOML, whose only
+    /// integer type is `i64` — a `u64` above `i64::MAX` makes saving fail with
+    /// "out-of-range value for u64 type". Bounding it here means any document we
+    /// hold in memory always round-trips through TOML.
+    #[serde(deserialize_with = "deserialize_clamped_seed")]
     pub seed: u64,
     /// Buffer length in seconds (looped).
     pub seconds: f32,
@@ -242,6 +249,20 @@ pub struct NoiseNode {
     /// Use a Gaussian (vs uniform) distribution for the continuous colors.
     #[serde(default)]
     pub gaussian: bool,
+}
+
+/// The largest noise [`seed`](NoiseNode::seed) that survives a TOML round-trip
+/// (TOML integers are `i64`). Seeds are clamped to this on input.
+pub const MAX_NOISE_SEED: u64 = i64::MAX as u64;
+
+/// Deserialize a noise seed, clamping it into the TOML-representable range so a
+/// later save can't fail. See [`NoiseNode::seed`].
+fn deserialize_clamped_seed<'de, D>(de: D) -> Result<u64, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let raw = u64::deserialize(de)?;
+    Ok(raw.min(MAX_NOISE_SEED))
 }
 
 impl Default for NoiseNode {

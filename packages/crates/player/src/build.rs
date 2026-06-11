@@ -265,21 +265,30 @@ fn build_node(
             let n = ctx
                 .create_oscillator()
                 .map_err(|e| js_err("oscillator", e))?;
-            n.set_type(osc_type(o.oscillator_type));
-            // Custom waveform: build a PeriodicWave from the harmonic amplitudes
-            // (imag = sine series, index 0 = DC). Falls back to the set type if
-            // none are given.
-            if o.oscillator_type == awsm_audio_schema::OscillatorType::Custom
-                && !o.harmonics.is_empty()
-            {
-                let mut real = vec![0.0f32; o.harmonics.len() + 1];
-                let mut imag = vec![0.0f32; o.harmonics.len() + 1];
-                for (i, h) in o.harmonics.iter().enumerate() {
-                    imag[i + 1] = *h;
-                }
-                if let Ok(wave) = ctx.create_periodic_wave(&mut real, &mut imag) {
+            // A `custom` waveform is selected *only* via setPeriodicWave — assigning
+            // `type = "custom"` directly throws ("cannot be set directly to
+            // 'custom'") and, in the offline context, kills the whole render. So
+            // for Custom we build the PeriodicWave from the harmonic amplitudes
+            // (imag = sine series, index 0 = DC) and never touch `set_type`; for
+            // every other type we set it normally.
+            if o.oscillator_type == awsm_audio_schema::OscillatorType::Custom {
+                if o.harmonics.is_empty() {
+                    // No harmonics to build a wave from — fall back to the default
+                    // (sine) rather than the illegal `custom` assignment.
+                    n.set_type(web_sys::OscillatorType::Sine);
+                } else {
+                    let mut real = vec![0.0f32; o.harmonics.len() + 1];
+                    let mut imag = vec![0.0f32; o.harmonics.len() + 1];
+                    for (i, h) in o.harmonics.iter().enumerate() {
+                        imag[i + 1] = *h;
+                    }
+                    let wave = ctx
+                        .create_periodic_wave(&mut real, &mut imag)
+                        .map_err(|e| js_err("oscillator periodic wave", e))?;
                     n.set_periodic_wave(&wave);
                 }
+            } else {
+                n.set_type(osc_type(o.oscillator_type));
             }
             apply_param(&n.frequency(), &o.frequency, t0);
             apply_param(&n.detune(), &o.detune, t0);

@@ -883,7 +883,7 @@ fn asset_row(id: SampleId, name: String, status: BounceStatus, dur: Option<f64>)
     let (badge, badge_col) = match status {
         BounceStatus::None => ("not bounced", "var(--text-2)"),
         BounceStatus::Clean => ("bounced", "oklch(0.78 0.15 150)"),
-        BounceStatus::Dirty => ("\u{25CF} dirty", "oklch(0.8 0.15 60)"),
+        BounceStatus::Dirty => ("\u{25CF} stale", "oklch(0.8 0.15 60)"),
     };
     let bounced = status != BounceStatus::None;
     let title = match dur {
