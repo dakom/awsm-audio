@@ -287,6 +287,34 @@ pub struct AttachWasmParams {
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct WorkletParamSpec {
+    /// Param name (becomes a labelled, automatable knob on the node).
+    pub name: String,
+    /// Minimum value. Defaults to 0.0.
+    #[serde(default)]
+    pub min: f32,
+    /// Maximum value.
+    pub max: f32,
+    /// Initial value.
+    pub default: f32,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct ScaffoldWorkletParams {
+    /// Crate/package name (kebab-case). Defaults to "my-worklet".
+    #[serde(default)]
+    pub name: Option<String>,
+    /// The automatable params the processor declares (each becomes a knob).
+    /// Defaults to a single `gain` (0.0–2.0, default 1.0).
+    #[serde(default)]
+    pub params: Option<Vec<WorkletParamSpec>>,
+    /// Emit the `#![no_std]` variant (smaller wasm; the macro also emits the
+    /// required panic handler). Defaults to false (a std crate, which "just works").
+    #[serde(default)]
+    pub no_std: bool,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct BounceParams {
     /// Target sample id (from `list_samples`).
     pub sample: SampleId,
@@ -1361,15 +1389,70 @@ impl EditorMcp {
     }
 
     #[tool(
-        description = "Return the recommended Cargo.toml dependency snippet for \
-        authoring an awsm-audio WASM DSP worklet (the crates.io release). Paste it \
-        into your worklet crate, then follow the awsm-audio://docs/worklet-abi guide \
-        (full Rust API: https://docs.rs/awsm-audio-worklet/latest). Use a worklet \
-        when no built-in node does the job — chorus/flanger, phaser, bitcrusher, \
-        ring modulator, custom grain/spectral effects."
+        description = "Return the recommended Cargo.toml for authoring an awsm-audio \
+        WASM DSP worklet (the crates.io release; dependency version derived so it \
+        never goes stale). Prefer `scaffold_worklet`, which emits this PLUS a \
+        ready-to-build src/lib.rs. Reach for a worklet only when no built-in node \
+        or combination expresses the DSP — FFT/spectral, granular, physical \
+        modeling, per-sample stateful nonlinearities, or custom synthesis (see the \
+        awsm-audio://docs/worklet-abi guide; API at docs.rs/awsm-audio-worklet/latest)."
     )]
     async fn worklet_cargo_toml(&self) -> Result<CallToolResult, McpError> {
-        Ok(text(WORKLET_CARGO_TOML))
+        Ok(text(worklet_cargo_toml_text("my-worklet")))
+    }
+
+    #[tool(
+        description = "Scaffold a ready-to-build awsm-audio WASM DSP worklet crate: \
+        returns {files:{\"Cargo.toml\",\"src/lib.rs\"}, build, wasm_path, next}. The \
+        lib.rs has the ABI fully wired (Processor impl, your `params` as declared \
+        ParamDesc knobs, the awsm_worklet! macro) with a passthrough `process()` — \
+        you only write the DSP. The Cargo.toml's dependency version is derived (never \
+        stale). Write the files, run `build`, then attach_wasm the `wasm_path` onto an \
+        audio_worklet node. Reach for this only for DSP no built-in expresses \
+        (FFT/spectral, granular, physical modeling, per-sample state, custom synthesis)."
+    )]
+    async fn scaffold_worklet(
+        &self,
+        Parameters(p): Parameters<ScaffoldWorkletParams>,
+    ) -> Result<CallToolResult, McpError> {
+        // Sanitize the crate name to a valid kebab-case package name.
+        let raw = p.name.unwrap_or_default();
+        let name = sanitize_crate_name(&raw);
+        // Params: default to a single gain knob.
+        let params = p.params.unwrap_or_else(|| {
+            vec![WorkletParamSpec {
+                name: "gain".into(),
+                min: 0.0,
+                max: 2.0,
+                default: 1.0,
+            }]
+        });
+        if params.len() > 32 {
+            return Err(McpError::invalid_params(
+                "a worklet declares at most 32 params (MAX_PARAMS)",
+                None,
+            ));
+        }
+        let lib_name = name.replace('-', "_");
+        let struct_name = kebab_to_camel(&name);
+        let files = serde_json::json!({
+            "Cargo.toml": worklet_cargo_toml_text(&name),
+            "src/lib.rs": worklet_lib_rs(&struct_name, &params, p.no_std),
+        });
+        Ok(text(
+            serde_json::json!({
+                "files": files,
+                "build": format!(
+                    "cargo build -p {name} --target wasm32-unknown-unknown --release"
+                ),
+                "wasm_path": format!(
+                    "target/wasm32-unknown-unknown/release/{lib_name}.wasm"
+                ),
+                "next": "write the files, run `build`, then attach_wasm { node, wasm_path } \
+                         onto an audio_worklet node (add_node kind audio_worklet first)",
+            })
+            .to_string(),
+        ))
     }
 
     // ── worklet authoring ────────────────────────────────────────────────────
@@ -1780,10 +1863,13 @@ impl ServerHandler for EditorMcp {
              render_wav for verification). To use an external audio sample (a \
              drum hit, vocal, field recording, impulse response), add_node an \
              audio_buffer_source (or convolver) and load_audio a local file path \
-             or a URL onto it. For DSP no built-in node provides — chorus / flanger, \
-             phaser, bitcrusher, ring modulator, custom grain/spectral effects — use \
-             an audio_worklet: read the awsm-audio://docs/worklet-abi resource, author \
-             + build a worklet crate, and attach it with the attach_wasm tool.\n\n\
+             or a URL onto it. Compose built-in nodes first; reach for an \
+             audio_worklet only for DSP no built-in or combination expresses — \
+             FFT/spectral, granular, physical modeling, per-sample stateful \
+             nonlinearities, or custom synthesis (not chorus/phaser/distortion, \
+             which are delay/all-pass/waveshaper). Use scaffold_worklet to emit a \
+             ready-to-build crate, then attach_wasm the compiled .wasm (read \
+             awsm-audio://docs/worklet-abi for the ABI).\n\n\
              For a song / full-track request, work arrangement-first instead \
              of one monolithic root sequencer: build and bounce each part as its own \
              short loop Sound, then create_arrangement and place clips into sections — \
@@ -2106,10 +2192,25 @@ An AudioWorklet node runs a **native Rust → wasm** DSP processor you author,
 compile, and attach. The MCP server only relays the bytes — you compile locally
 (so you get cargo's errors directly) and pass the `.wasm` to `attach_wasm`.
 
-**When to use one:** reach for a worklet whenever no built-in node does the job —
-chorus / flanger (modulated delay), phaser (all-pass chain), bitcrusher, ring
-modulator, custom grain / spectral effects. The full Rust API of the
-`awsm-audio-worklet` crate is at <https://docs.rs/awsm-audio-worklet/latest>.
+**When to use one — and when NOT to.** Reach for a worklet *only* when no built-in
+node (or combination of them) can express the DSP. That means:
+
+- **FFT / spectral** — vocoder, spectral freeze / gate, pitch-shift, spectral blur.
+- **Granular synthesis** — grain clouds, time-stretch, texture smearing.
+- **Physical modeling** — Karplus-Strong pluck, waveguides, modal resonators.
+- **Per-sample stateful nonlinearities** — wavefolders, custom saturation chains,
+  envelope followers, dynamics beyond the compressor.
+- **Custom synthesis algorithms** — FM operator stacks, additive with per-partial
+  control, a supersaw (detuned voices) in one node.
+
+**Don't** write a worklet for things the built-ins already do: modulated-delay
+effects (chorus / flanger) are a `delay` with an LFO on `delayTime`; a phaser is an
+all-pass `biquad_filter` chain; distortion / bitcrush is a `waveshaper` (with a
+custom curve if needed). Compose nodes first; drop to a worklet for genuine gaps.
+
+The fastest path is the `scaffold_worklet` tool — it emits a ready-to-build crate
+(Cargo.toml + a wired `src/lib.rs` with your params, `process()` stubbed) so you
+only write DSP. The full Rust API is at <https://docs.rs/awsm-audio-worklet/latest>.
 
 ## 1. Author a crate
 
@@ -2125,7 +2226,7 @@ edition = "2021"
 crate-type = ["cdylib"]
 
 [dependencies]
-awsm-audio-worklet = "0.1"
+awsm-audio-worklet = "1"
 ```
 
 (The `worklet_cargo_toml` tool returns this snippet ready to paste.)
@@ -2457,11 +2558,24 @@ fn unexpected_query(qr: QueryResult) -> McpError {
     McpError::internal_error(format!("unexpected query result: {qr:?}"), None)
 }
 
-/// The crates.io dependency snippet returned by `worklet_cargo_toml`. Kept in
-/// lockstep with the published `awsm-audio-worklet` version.
-const WORKLET_CARGO_TOML: &str = r#"# Cargo.toml for an awsm-audio WASM DSP worklet
+/// The `awsm-audio-worklet` semver requirement to emit in a generated worklet
+/// crate — the **major** of *this binary's* version (the crate publishes in
+/// lockstep via `version.workspace = true`), as a caret req so cargo always picks
+/// the latest compatible publish. Derived (never a hardcoded literal) so it can't
+/// go stale across a major bump. `env!("CARGO_PKG_VERSION")` is `&'static`, and
+/// `split_once` hands back `&'static` subslices — so this stays `&'static str`.
+fn worklet_dep_req() -> &'static str {
+    let v = env!("CARGO_PKG_VERSION");
+    v.split_once('.').map(|(major, _)| major).unwrap_or(v)
+}
+
+/// The Cargo.toml for a worklet crate named `name`, with the dependency version
+/// derived by [`worklet_dep_req`].
+fn worklet_cargo_toml_text(name: &str) -> String {
+    format!(
+        r#"# Cargo.toml for an awsm-audio WASM DSP worklet
 [package]
-name = "my-worklet"
+name = "{name}"
 version = "0.1.0"
 edition = "2021"
 
@@ -2469,9 +2583,9 @@ edition = "2021"
 crate-type = ["cdylib"]
 
 [dependencies]
-awsm-audio-worklet = "0.1"
+awsm-audio-worklet = "{req}"
 
-# Build: cargo build -p my-worklet --target wasm32-unknown-unknown --release
+# Build: cargo build -p {name} --target wasm32-unknown-unknown --release
 # Attach the resulting .wasm with the attach_wasm tool.
 # Guide: awsm-audio://docs/worklet-abi   API: https://docs.rs/awsm-audio-worklet/latest
 #
@@ -2479,7 +2593,120 @@ awsm-audio-worklet = "0.1"
 # macro as `awsm_worklet!(MyProc, no_std);` — that form also emits the
 # `#[panic_handler]` a no_std cdylib requires (otherwise the build fails at link
 # with "`#[panic_handler]` function required, but not found").
-"#;
+"#,
+        name = name,
+        req = worklet_dep_req(),
+    )
+}
+
+/// A valid kebab-case crate name from arbitrary input (invalid chars → `-`),
+/// falling back to `my-worklet`.
+fn sanitize_crate_name(s: &str) -> String {
+    let cleaned: String = s
+        .trim()
+        .to_lowercase()
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    let trimmed = cleaned.trim_matches('-');
+    if trimmed.is_empty() {
+        "my-worklet".to_string()
+    } else {
+        trimmed.to_string()
+    }
+}
+
+/// `"my-worklet"` → `"MyWorklet"` (the Processor struct name).
+fn kebab_to_camel(s: &str) -> String {
+    let camel: String = s
+        .split(['-', '_'])
+        .filter(|w| !w.is_empty())
+        .map(|w| {
+            let mut c = w.chars();
+            match c.next() {
+                Some(f) => f.to_uppercase().collect::<String>() + c.as_str(),
+                None => String::new(),
+            }
+        })
+        .collect();
+    if camel.is_empty() {
+        "Worklet".to_string()
+    } else {
+        camel
+    }
+}
+
+/// The `src/lib.rs` for a scaffolded worklet: the ABI fully wired (Processor impl,
+/// the declared params as ParamDesc knobs, the `awsm_worklet!` macro) with a
+/// passthrough `process()` the author replaces with DSP.
+fn worklet_lib_rs(struct_name: &str, params: &[WorkletParamSpec], no_std: bool) -> String {
+    let param_lines: String = params
+        .iter()
+        .map(|p| {
+            format!(
+                "        ParamDesc::new({:?}, {:?}, {:?}, {:?}),",
+                p.name, p.min, p.max, p.default
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let read_hints: String = params
+        .iter()
+        .enumerate()
+        .map(|(i, p)| {
+            format!(
+                "        //   params.get({i})  → {:?}  ({}..{}, default {})",
+                p.name, p.min, p.max, p.default
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let header = if no_std { "#![no_std]\n\n" } else { "" };
+    let macro_call = if no_std {
+        format!("awsm_worklet!({struct_name}, no_std);")
+    } else {
+        format!("awsm_worklet!({struct_name});")
+    };
+    format!(
+        r#"{header}use awsm_audio_worklet::{{awsm_worklet, ParamDesc, Params, Processor}};
+
+struct {struct_name};
+
+impl Processor for {struct_name} {{
+    // Each ParamDesc(name, min, max, default) is a labelled, automatable knob.
+    const PARAMS: &'static [ParamDesc] = &[
+{param_lines}
+    ];
+
+    fn new(_sample_rate: f32) -> Self {{
+        {struct_name}
+    }}
+
+    // Per-channel (planar) slices, equal length (<= 128 frames). NO allocation in
+    // here. Use the crate's `math::{{sin, tanh, ...}}` instead of `f32::sin` etc.
+    fn process(&mut self, input: &[&[f32]], output: &mut [&mut [f32]], params: &Params) {{
+        // Your declared params (read with params.get(i)):
+{read_hints}
+        let _ = params;
+        // TODO: replace this passthrough with your DSP.
+        for ch in 0..output.len() {{
+            for (o, &i) in output[ch].iter_mut().zip(input[ch]) {{
+                *o = i;
+            }}
+        }}
+    }}
+}}
+
+{macro_call}
+"#
+    )
+}
 
 /// A tool argument that is **strongly typed** — its JSON Schema is exactly `T`'s,
 /// so a fresh agent sees the precise shape — yet tolerant of clients that deliver
