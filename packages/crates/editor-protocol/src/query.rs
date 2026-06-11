@@ -152,7 +152,7 @@ pub struct SampleInfo {
     pub kind: SampleKind,
     pub is_root: bool,
     pub is_active: bool,
-    /// Bounce state for a Sound: `"none"` / `"clean"` / `"dirty"`. `None` for an
+    /// Bounce state for a Sound: `"none"` / `"clean"` / `"stale"`. `None` for an
     /// Arrangement (not bounceable). Mirrors `AssetInfo.bounce` so `list_samples`
     /// is a one-stop view.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -167,7 +167,7 @@ pub struct SampleInfo {
 pub struct AssetInfo {
     pub id: SampleId,
     pub name: String,
-    /// `"none"` / `"clean"` / `"dirty"`.
+    /// `"none"` / `"clean"` / `"stale"`.
     pub bounce: String,
     pub duration_secs: Option<f64>,
 }
@@ -224,6 +224,9 @@ pub struct WavStats {
     pub rms: f32,
     pub channels: u32,
     pub sample_rate: u32,
+    /// True when `peak > 1.0` — the render clips (distorts) and needs the level
+    /// brought down. Saves the caller having to know that 1.0 is the ceiling.
+    pub clipping: bool,
 }
 
 impl WavStats {
@@ -258,6 +261,7 @@ impl WavStats {
             rms,
             channels: channels.len() as u32,
             sample_rate,
+            clipping: peak > 1.0,
         }
     }
 }

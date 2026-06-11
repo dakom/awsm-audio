@@ -175,6 +175,7 @@ fn query_result_round_trip() {
             rms: 0.6,
             channels: 2,
             sample_rate: 48_000,
+            clipping: false,
         }),
         QueryResult::Waveform(WaveformEnvelope {
             sample_rate: 48_000,
@@ -271,7 +272,7 @@ fn response_round_trip() {
             peak: 0.9,
             rms: 0.5,
         }),
-        Response::Query(Box::new(QueryResult::BounceStatus("dirty".into()))),
+        Response::Query(Box::new(QueryResult::BounceStatus("stale".into()))),
     ];
     for r in &responses {
         json_round_trip(r);

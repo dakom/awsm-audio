@@ -532,8 +532,9 @@ impl EditorMcp {
     }
 
     #[tool(description = "One Sound's bounce status: none (never bounced) / \
-        clean / dirty (stale) / rendering (in flight) / 'failed: <msg>' (the last \
-        render crashed — msg names the offending node).")]
+        clean / stale (graph changed since the bounce — re-bounce) / rendering \
+        (in flight) / 'failed: <msg>' (the last render crashed — msg names the \
+        offending node).")]
     async fn get_bounce_status(
         &self,
         Parameters(p): Parameters<SampleReq>,
@@ -800,8 +801,9 @@ impl EditorMcp {
         sample's bounce (so it can be dropped into an arrangement). Pass \
         `duration_secs` to capture a fixed span of a procedural / worklet source \
         that otherwise renders only a tiny default. Blocks until the render lands \
-        (bounce status → clean) or a ~30 s safety timeout, so you can inspect \
-        wav_stats / waveform immediately after — no manual polling. On timeout it \
+        or a ~30 s safety timeout (no manual polling), then returns the result's \
+        {duration_secs, peak, rms, clipping} — so you see immediately whether it \
+        clipped (peak > 1.0) without a separate wav_stats call. On timeout it \
         returns the last status; re-check get_bounce_status / list_assets."
     )]
     async fn bounce(
@@ -829,10 +831,31 @@ impl EditorMcp {
                 other => return Err(unexpected_query(other)),
             };
             if status == "clean" {
-                return Ok(text(format!(
-                    "bounce complete (status: clean) for {}",
-                    p.sample
-                )));
+                // Fold the verification into the bounce result: report the
+                // bounced asset's stats (and whether it clips) so the caller
+                // needn't a separate wav_stats round-trip.
+                let stats = match self
+                    .query_result(EditorQuery::WavStats {
+                        sample: Some(p.sample),
+                        bounced: true,
+                        duration_secs: None,
+                    })
+                    .await?
+                {
+                    QueryResult::WavStats(s) => s,
+                    other => return Err(unexpected_query(other)),
+                };
+                return Ok(text(
+                    serde_json::json!({
+                        "status": "clean",
+                        "sample": p.sample,
+                        "duration_secs": stats.duration_secs,
+                        "peak": stats.peak,
+                        "rms": stats.rms,
+                        "clipping": stats.clipping,
+                    })
+                    .to_string(),
+                ));
             }
             // Fail fast instead of waiting out the timeout when the render crashed
             // (e.g. an offline-unsupported node). The status names the offender.
@@ -976,6 +999,7 @@ impl EditorMcp {
         &self,
         Parameters(p): Parameters<AddClipParams>,
     ) -> Result<CallToolResult, McpError> {
+        self.ensure_source_bounced(p.source).await?;
         let start = self
             .resolve_start_secs(p.start, p.start_beats, p.start_bars, p.beats_per_bar)
             .await?;
@@ -1001,6 +1025,7 @@ impl EditorMcp {
         &self,
         Parameters(p): Parameters<AddClipsParams>,
     ) -> Result<CallToolResult, McpError> {
+        self.ensure_source_bounced(p.source).await?;
         let bpb = p.beats_per_bar.unwrap_or(4.0);
         // Collect start positions (seconds) from whichever form was given.
         let mut starts: Vec<f64> = Vec::new();
@@ -1304,7 +1329,7 @@ impl EditorMcp {
                         clean += 1;
                         "clean"
                     }
-                    Some("dirty") => {
+                    Some("stale") => {
                         stale += 1;
                         "stale"
                     }
@@ -1624,6 +1649,25 @@ impl EditorMcp {
             format!("no output key '{key}' on node {from}; available: {}", keys.join(", ")),
             None,
         ))
+    }
+
+    /// Error if `source` has never been bounced — a clip of it would be silent.
+    /// (A `stale` bounce still plays its last audio, so only `none` is rejected;
+    /// `arrangement_bounce_report` flags stale clips.)
+    async fn ensure_source_bounced(&self, source: SampleId) -> Result<(), McpError> {
+        match self
+            .query_result(EditorQuery::BounceStatus { sample: source })
+            .await?
+        {
+            QueryResult::BounceStatus(s) if s == "none" => Err(McpError::invalid_params(
+                format!(
+                    "source {source} is not bounced — call bounce on it first so the clip has audio"
+                ),
+                None,
+            )),
+            QueryResult::BounceStatus(_) => Ok(()),
+            other => Err(unexpected_query(other)),
+        }
     }
 
     /// The active arrangement's BPM (for beat/bar → seconds conversion). Errors if

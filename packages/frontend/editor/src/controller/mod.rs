@@ -248,7 +248,7 @@ impl BounceStatus {
         match self {
             BounceStatus::None => "none",
             BounceStatus::Clean => "clean",
-            BounceStatus::Dirty => "dirty",
+            BounceStatus::Dirty => "stale",
         }
     }
 }
