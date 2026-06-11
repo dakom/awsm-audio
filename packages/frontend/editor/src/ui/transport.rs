@@ -79,8 +79,6 @@ pub fn render() -> Dom {
             )))
             .child(IconBtn::new("fit").title("Fit all nodes in view")
                 .on_click(|| controller().zoom_to_fit()).render())
-            .child(IconBtn::new("help").title("How to use this editor")
-                .on_click(|| controller().open_help()).render())
         }))
         .child(vdivider())
         // MCP remote-control link (connect modal + reactive status).
@@ -109,7 +107,23 @@ pub fn render() -> Dom {
             .child(stop_button())
             .child(loop_button())
         }))
+        .child(vdivider())
+        // Help — a prominent, labelled button (the old `?` icon, made discoverable).
+        .child(help_button())
     })
+}
+
+/// The Help button: a rectangular, labelled call-to-action (keeping the `?`
+/// icon) parked beside the transport so it's easy to find.
+fn help_button() -> Dom {
+    Btn::new()
+        .label("Help")
+        .icon("help")
+        .variant(BtnVariant::Solid)
+        .size(BtnSize::Md)
+        .title("How to use this editor + the MCP")
+        .on_click(|| controller().open_help())
+        .render()
 }
 
 /// A 1px vertical rule separating top-bar groups.

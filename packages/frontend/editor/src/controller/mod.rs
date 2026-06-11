@@ -815,6 +815,7 @@ impl EditorController {
                         ConnSink::Trigger => continue,
                     };
                     sub.graph.connections.push(Connection {
+                        id: None,
                         from: ConnectionSource::NodeOutput {
                             node: c.from.id,
                             output: c.from_output,
@@ -837,6 +838,7 @@ impl EditorController {
                             inlet_order.len() - 1
                         });
                     sub.graph.connections.push(Connection {
+                        id: None,
                         from: ConnectionSource::Inlet {
                             port: PortId::from(format!("in{idx}")),
                         },
@@ -860,6 +862,7 @@ impl EditorController {
                             outlet_order.len() - 1
                         });
                     sub.graph.connections.push(Connection {
+                        id: None,
                         from: ConnectionSource::NodeOutput {
                             node: c.from.id,
                             output: c.from_output,
@@ -1083,6 +1086,15 @@ impl EditorController {
             EditorCommand::AddNode { kind, x, y } => {
                 let node = EditorNode::new(NodeId::new(), kind, (x, y));
                 let id = node.id;
+                // A NoteSequencer created with an inline, already-populated `song`
+                // (tracks + note events, e.g. via add_node / dispatch_command) must
+                // have its sound `outputs` derived up front — otherwise they stay
+                // empty and any later `bind` targets a non-existent port (silent
+                // silence). Mirror what add_note/set_song do, but at creation time.
+                if let awsm_audio_schema::NodeKind::NoteSequencer(ms) = &mut *node.kind.borrow_mut()
+                {
+                    ms.outputs = Self::outputs_for_song(ms.mode, &ms.song, &ms.outputs);
+                }
                 // Push first so the node exists in the list before selection
                 // (set_selection scans `nodes` to flag + compute the inspected one).
                 self.nodes.lock_mut().push_cloned(node);
@@ -1219,6 +1231,27 @@ impl EditorController {
                 else {
                     return;
                 };
+                // Fail loudly instead of silently storing a wire to a port that
+                // doesn't exist. A sequencer's outputs are derived from its song
+                // (one per melodic track / drum note); binding `from_output` before
+                // that output exists (e.g. an empty sequencer) would otherwise be
+                // accepted and then resolve to an empty key — a wire that carries
+                // nothing. Reject it and tell the user what's missing.
+                {
+                    let kind = from_node.kind.borrow();
+                    if crate::ports::is_sequencer(&kind)
+                        && crate::ports::seq_key_at(&kind, from_output as usize).is_none()
+                    {
+                        drop(kind);
+                        let msg = format!(
+                            "Bind ignored: sequencer has no output #{from_output} yet \
+                             (add tracks/notes first — outputs are derived from the song)."
+                        );
+                        tracing::warn!("{msg}");
+                        self.status.set(Some(msg));
+                        return;
+                    }
+                }
                 // One trigger binding per (sequencer-output → instrument); a fresh
                 // bind to the same instrument from a different output layers them.
                 let dup = self.connections.lock_ref().iter().any(|c| {
@@ -1611,6 +1644,10 @@ impl EditorController {
             PlayRole::Audition => {}
         }
         self.status.set(None);
+        // Clear any pending auto-stop/loop timer left by a prior song/arrangement
+        // pass so it can't fire mid-audition. (An audition has no defined content
+        // length, so it isn't itself auto-stopped — it plays until told to stop.)
+        self.cancel_song_loop();
         let graph = self.playable_graph();
         let mut slot = self.player.borrow_mut();
         if slot.is_none() {
@@ -1662,126 +1699,15 @@ impl EditorController {
         self.play_song();
     }
 
-    /// Assemble the arrangement to play: the raw active-sample graph (instrument-
-    /// refs kept as voice buses, NOT flattened) plus one [`TriggerPart`] per
-    /// `SeqOut → Trigger` wire — the sound's notes resolved to seconds/transpose/
-    /// gain and the flattened instrument the wire targets. `loop_secs` is the
-    /// arrangement's content length when looping (transport loop, or any
-    /// sequencer set to loop).
-    fn arrangement_parts(
-        &self,
-    ) -> (
-        awsm_audio_schema::Graph,
-        Vec<awsm_audio_player::TriggerPart>,
-        Option<f64>,
-    ) {
-        let arrangement = self.to_graph();
-        let lib = self.to_library();
-        let mut parts = Vec::new();
-        let mut content_end = 0.0f64;
-        // The largest explicit playback-window length (secs) across sequencers, if
-        // any set a stop; drives loop length over content when present.
-        let mut window_end = 0.0f64;
-        // Looping is controlled solely by the transport's Loop toggle — a
-        // sequencer node's own `looping` flag never forces it on.
-        let wants_loop = self.looping.get();
-        let conns = self.connections.lock_ref();
-        for c in conns.iter() {
-            if !matches!(c.sink, ConnSink::Trigger) {
-                continue;
-            }
-            // Source: the sequencer + the keyed sound output at this port.
-            let Some(ms) = self.song_node(c.from.id) else {
-                continue;
-            };
-            let Some(out) = ms.outputs.get(c.from_output as usize) else {
-                continue;
-            };
-            let Some(track) = ms.song.tracks.get(out.track) else {
-                continue;
-            };
-            // Target: the instrument-ref's referenced Instrument sample, flattened
-            // into a playable graph (instantiated once per note by the engine).
-            let inst_id = match &*c.to.kind.borrow() {
-                awsm_audio_schema::NodeKind::Sample(sr) => sr.sample,
-                _ => continue,
-            };
-            let instrument = awsm_audio_schema::flatten(&lib, inst_id);
-            if instrument.nodes.is_empty() {
-                continue;
-            }
-            // Notes: a drum sound takes only its note (played at written pitch + the
-            // output's transpose); a melodic sound pitches each note by `n - 60`.
-            // Only notes inside the playback window [start, end) are scheduled, with
-            // times measured from the window start.
-            let base = ms.song.beats_to_secs(ms.start);
-            let mut notes = Vec::new();
-            for ev in &track.events {
-                if let Some(n) = out.note {
-                    if ev.note != n {
-                        continue;
-                    }
-                }
-                if ev.start < ms.start {
-                    continue; // before the window start
-                }
-                if let Some(win_end) = ms.end {
-                    if ev.start >= win_end {
-                        continue; // at/after the window stop
-                    }
-                }
-                let start = ms.song.beats_to_secs(ev.start) - base;
-                let end = ms.song.beats_to_secs(ev.start + ev.length) - base;
-                let semitones = if out.note.is_some() {
-                    out.transpose
-                } else {
-                    ev.note as i32 - 60 + out.transpose
-                };
-                let velocity = ((ev.velocity as f32 / 127.0) * out.gain).clamp(0.0, 1.0);
-                content_end = content_end.max(end);
-                notes.push(awsm_audio_player::SongVoiceSpec {
-                    start,
-                    end,
-                    semitones,
-                    velocity,
-                });
-            }
-            // Loop window: an explicit stop marker, else the authored song length
-            // (its bars). Looping over the musical window — not the last note's
-            // tail — makes a loop sample-exact (a 2-bar groove repeats on the bar,
-            // even if the last hit ends a hair early). Falls back to content end
-            // only when neither is set.
-            let win_beats = ms.end.or((ms.length > 0.0).then_some(ms.length));
-            if let Some(win_end) = win_beats {
-                let win = ms.song.beats_to_secs(win_end) - base;
-                window_end = window_end.max(win.max(0.05));
-            }
-            if notes.is_empty() {
-                continue;
-            }
-            parts.push(awsm_audio_player::TriggerPart {
-                target: c.to.id,
-                instrument,
-                notes,
-            });
-        }
-        drop(conns);
-        // Loop over the explicit window if one is set, else the content length.
-        let loop_len = if window_end > 0.0 {
-            window_end
-        } else {
-            content_end
-        };
-        let loop_secs = wants_loop.then(|| loop_len.max(0.05));
-        (arrangement, parts, loop_secs)
-    }
-
-    /// Schedule and play the whole arrangement, arming a loop if set.
+    /// auto-stop at the content's end.
     fn play_song(&self) {
         self.loop_arrangement.set(false);
-        let (arrangement, parts, loop_secs) = self.arrangement_parts();
-        let control = self.control_parts();
-        if parts.is_empty() && control.is_empty() {
+        // Shared assembly: the same `sequence_parts` the bounce path + a standalone
+        // player use, over the committed document.
+        let sp =
+            awsm_audio_player::document::sequence_parts(&self.to_library(), *self.active.borrow());
+        let content_secs = (sp.loop_secs > 0.0).then(|| sp.loop_secs.max(0.05));
+        if sp.triggers.is_empty() && sp.control.is_empty() {
             self.status.set(Some(
                 "Wire a sequencer output to an instrument's trigger inlet (or a parameter) to play."
                     .into(),
@@ -1795,22 +1721,29 @@ impl EditorController {
         let mut at = 0.0;
         if let Some(p) = self.player.borrow_mut().as_mut() {
             p.set_master_gain(1.0);
-            if let Err(e) = p.play_arrangement(&arrangement, self.looping.get()) {
+            if let Err(e) = p.play_arrangement(&sp.graph, self.looping.get()) {
                 tracing::error!("play arrangement failed: {e}");
                 return;
             }
             at = p.current_time() + 0.1;
-            if let Err(e) = p.schedule_triggers(&parts, at) {
+            if let Err(e) = p.schedule_triggers(&sp.triggers, at) {
                 tracing::error!("schedule_triggers failed: {e}");
             }
-            p.schedule_control(&control, at);
+            p.schedule_control(&sp.control, at);
         }
         self.song_start.set(at);
         self.playing.set_neq(true);
-        if let Some(ls) = loop_secs {
-            self.song_loop_secs.set(ls);
-            self.song_next_start.set(at + ls);
-            self.arm_song_loop(gen);
+        if let Some(ls) = content_secs {
+            if self.looping.get() {
+                self.song_loop_secs.set(ls);
+                self.song_next_start.set(at + ls);
+                self.arm_song_loop(gen);
+            } else {
+                // Not looping: return to idle when the content finishes (so the
+                // transport doesn't sit "playing" forever and a later play starts
+                // fresh rather than from a mid-timeline position).
+                self.arm_auto_stop(gen, ls);
+            }
         }
     }
 
@@ -1870,9 +1803,13 @@ impl EditorController {
     /// resolving each clip's source bounce, folding in track + clip gain, and
     /// applying the scrub seek (drop clips fully before it; trim the rest).
     fn arrangement_audio_clips(&self) -> Vec<awsm_audio_player::AudioClipPart> {
-        self.active_arrangement()
-            .map(|arr| self.clips_of(&arr, self.arrange_start.get().max(0.0)))
-            .unwrap_or_default()
+        // Delegate to the shared player assembly (the active sample is the
+        // arrangement; non-arrangements resolve to no clips).
+        awsm_audio_player::document::audio_clip_parts(
+            &self.to_library(),
+            *self.active.borrow(),
+            self.arrange_start.get().max(0.0),
+        )
     }
 
     /// The stored [`Arrangement`](awsm_audio_schema::Arrangement) of sample `id`
@@ -1889,52 +1826,6 @@ impl EditorController {
                 s.sample.id == id && s.sample.kind == awsm_audio_schema::SampleKind::Arrangement
             })
             .map(|s| s.sample.arrangement.clone())
-    }
-
-    /// Build the schedulable audio clips of `arr`, seek-adjusted so a clip's audio
-    /// is relative to `seek` seconds on the timeline. Shared by live playback
-    /// (seek = scrub position) and offline export (seek = window start).
-    fn clips_of(
-        &self,
-        arr: &awsm_audio_schema::Arrangement,
-        seek: f64,
-    ) -> Vec<awsm_audio_player::AudioClipPart> {
-        let seek = seek.max(0.0);
-        // If any track is soloed, only soloed tracks play (and mute still wins).
-        let any_solo = arr.tracks.iter().any(|t| t.solo);
-        let mut out = Vec::new();
-        for track in &arr.tracks {
-            if track.mute || (any_solo && !track.solo) {
-                continue;
-            }
-            for clip in &track.clips {
-                let Some(buffer) = self.bounce_asset(clip.source) else {
-                    continue; // source not bounced
-                };
-                let clip_end = clip.start + clip.length;
-                if clip_end <= seek {
-                    continue; // entirely before the scrub point
-                }
-                let lead = (seek - clip.start).max(0.0); // part of the clip before seek
-                let speed = if clip.speed > 0.0 {
-                    clip.speed as f64
-                } else {
-                    1.0
-                };
-                out.push(awsm_audio_player::AudioClipPart {
-                    buffer,
-                    start: (clip.start - seek).max(0.0),
-                    // Seeking `lead` timeline seconds in advances the buffer by
-                    // `lead * speed`.
-                    offset: clip.offset + lead * speed,
-                    length: (clip.length - lead).max(0.0),
-                    gain: clip.gain * track.gain,
-                    looping: clip.looping,
-                    speed,
-                });
-            }
-        }
-        out
     }
 
     /// Set the arrangement scrub/playback-start position (seconds), move the
@@ -2032,22 +1923,27 @@ impl EditorController {
         }
         self.song_start.set(at);
         self.playing.set_neq(true);
-        if self.looping.get() {
-            let region = self
-                .active_arrangement()
-                .map(|a| {
-                    if a.has_markers() {
-                        let (s, e) = a.range();
-                        (e - s).max(0.1)
-                    } else {
-                        (a.length_secs - self.arrange_start.get().max(0.0)).max(0.1)
-                    }
-                })
-                .unwrap_or(0.0);
-            if region > 0.1 {
+        // The play region: the marked range, else from the start to the timeline
+        // end. Drives the loop length (loop on) or the auto-stop point (loop off).
+        let region = self
+            .active_arrangement()
+            .map(|a| {
+                if a.has_markers() {
+                    let (s, e) = a.range();
+                    (e - s).max(0.1)
+                } else {
+                    (a.length_secs - self.arrange_start.get().max(0.0)).max(0.1)
+                }
+            })
+            .unwrap_or(0.0);
+        if region > 0.1 {
+            if self.looping.get() {
                 self.song_loop_secs.set(region);
                 self.song_next_start.set(at + region);
                 self.arm_song_loop(gen);
+            } else {
+                // Not looping: stop + return to idle when the timeline ends.
+                self.arm_auto_stop(gen, region);
             }
         }
     }
@@ -2068,15 +1964,17 @@ impl EditorController {
                 let _ = p.schedule_audio_clips(&clips, start);
             }
         } else {
-            // Sequences song: re-schedule note triggers + control.
-            let (_g, parts, loop_secs) = self.arrangement_parts();
-            let control = self.control_parts();
-            if (parts.is_empty() && control.is_empty()) || loop_secs.is_none() {
+            // Sequences song: re-schedule note triggers + control (shared assembly).
+            let sp = awsm_audio_player::document::sequence_parts(
+                &self.to_library(),
+                *self.active.borrow(),
+            );
+            if (sp.triggers.is_empty() && sp.control.is_empty()) || sp.loop_secs <= 0.0 {
                 return;
             }
             if let Some(p) = self.player.borrow_mut().as_mut() {
-                let _ = p.schedule_triggers(&parts, start);
-                p.schedule_control(&control, start);
+                let _ = p.schedule_triggers(&sp.triggers, start);
+                p.schedule_control(&sp.control, start);
             }
         }
         self.song_start.set(start);
@@ -2120,6 +2018,52 @@ impl EditorController {
                 win.clear_timeout_with_handle(id);
             }
         }
+    }
+
+    /// Arm a one-shot timer to stop the transport `secs` into a non-looping pass —
+    /// when the content finishes — returning to idle. Reuses the `song_timer` slot
+    /// (a non-looping pass arms no loop timer). A small tail past the content end
+    /// lets the final release / reverb ring out before the teardown.
+    fn arm_auto_stop(&self, gen: u64, secs: f64) {
+        let Some(win) = web_sys::window() else { return };
+        let delay_ms = ((secs + 0.25).max(0.05) * 1000.0) as i32;
+        let ctrl = self.clone();
+        let cb = Closure::<dyn FnMut()>::new(move || ctrl.auto_stop_fired(gen));
+        // Clear any previous timer before replacing it.
+        if let Some((id, _)) = self.song_timer.borrow_mut().take() {
+            win.clear_timeout_with_handle(id);
+        }
+        match win.set_timeout_with_callback_and_timeout_and_arguments_0(
+            cb.as_ref().unchecked_ref(),
+            delay_ms,
+        ) {
+            Ok(id) => *self.song_timer.borrow_mut() = Some((id, cb)),
+            Err(e) => tracing::error!("auto-stop timer failed: {e:?}"),
+        }
+    }
+
+    /// The auto-stop timer fired: tear playback down and return to idle (mirrors
+    /// [`stop`](Self::stop)). Deliberately does **not** touch `song_timer` — we're
+    /// running inside its own closure, so taking + dropping it here would free the
+    /// closure on the stack. The next `play`/`stop`/`cancel_song_loop` clears the
+    /// (now-finished) slot. Stale fires (a newer pass superseded us, or already
+    /// stopped) are ignored via the generation check.
+    fn auto_stop_fired(&self, gen: u64) {
+        if gen != self.song_gen.get() || !self.playing.get() {
+            return;
+        }
+        if let Some(p) = self.player.borrow_mut().as_mut() {
+            p.stop();
+        }
+        self.playing.set_neq(false);
+        self.paused.set_neq(false);
+        self.status.set(None);
+        // Return to where this play session began (the play origin).
+        let origin = self.play_origin.get();
+        self.arrange_start.set(origin);
+        self.arrange_playhead.set(origin);
+        // Invalidate any other in-flight tick; leaves `song_timer` intact (us).
+        self.song_gen.set(self.song_gen.get().wrapping_add(1));
     }
 
     /// Playback position within the current song pass, in beats — for the
@@ -2400,6 +2344,28 @@ impl EditorController {
         });
     }
 
+    /// Replace every event of `track` in one shot (bulk pattern authoring), kept
+    /// time-ordered, then re-derive outputs so new drum notes get their own
+    /// sounds. Snapshots for undo since it can change the whole track at once.
+    fn set_song_track_events(
+        &self,
+        node: NodeId,
+        track: usize,
+        events: Vec<awsm_audio_schema::NoteEvent>,
+    ) {
+        self.edit_song(node, true, move |ms| {
+            if let Some(t) = ms.song.tracks.get_mut(track) {
+                t.events = events;
+                t.events.sort_by(|a, b| {
+                    a.start
+                        .partial_cmp(&b.start)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                });
+            }
+            ms.outputs = Self::outputs_for_song(ms.mode, &ms.song, &ms.outputs);
+        });
+    }
+
     // ==================================================================
     // Control Sequencer node editing. A Control Sequencer owns lanes; each lane
     // is a keyed output port wired to a node parameter (`SeqOut → NodeParam`),
@@ -2602,43 +2568,6 @@ impl EditorController {
         });
     }
 
-    /// Collect the control-lane automation to schedule: one [`ControlLanePart`]
-    /// per `SeqOut(control seq) → NodeParam` wire, with beats resolved to seconds.
-    fn control_parts(&self) -> Vec<awsm_audio_player::ControlLanePart> {
-        let mut parts = Vec::new();
-        let conns = self.connections.lock_ref();
-        for c in conns.iter() {
-            let ConnSink::Param(param) = &c.sink else {
-                continue;
-            };
-            let Some(cs) = self.control_node(c.from.id) else {
-                continue; // not a control-sequencer source
-            };
-            let Some(lane) = cs.lanes.get(c.from_output as usize) else {
-                continue;
-            };
-            let bpm = cs.bpm.max(1.0);
-            let base = cs.start * 60.0 / bpm;
-            let mut points = Vec::new();
-            for p in &lane.points {
-                let secs = p.beat * 60.0 / bpm - base;
-                if secs < 0.0 {
-                    continue;
-                }
-                points.push((secs, p.value, p.curve));
-            }
-            if points.is_empty() {
-                continue;
-            }
-            parts.push(awsm_audio_player::ControlLanePart {
-                target: c.to.id,
-                param: param.0.clone(),
-                points,
-            });
-        }
-        parts
-    }
-
     // ==================================================================
     // Command routers: map a serializable op (the MCP/serde write surface) to
     // the node-specific editor methods above. Each `EditSong/Control/Live`
@@ -2661,6 +2590,9 @@ impl EditorController {
                 event,
             } => self.update_song_note(node, track, index, event),
             SongOp::RemoveNote { track, index } => self.remove_song_note(node, track, index),
+            SongOp::SetTrackEvents { track, events } => {
+                self.set_song_track_events(node, track, events)
+            }
             SongOp::SetOutputTranspose { index, semitones } => {
                 self.set_output_transpose(node, index, semitones)
             }
@@ -3118,21 +3050,6 @@ impl EditorController {
     // Bounce: render a Sound to an audio clip the arrangement can play.
     // ==================================================================
 
-    /// Whether a graph plays as a *song* — it drives instruments via
-    /// `SeqOut→Trigger` wires or routes to a speaker `Output` (so bounce compiles
-    /// its sequenced notes); otherwise it's an audition patch rendered to master.
-    fn graph_is_song(graph: &awsm_audio_schema::Graph) -> bool {
-        use awsm_audio_schema::{ConnectionSink, NodeKind};
-        graph
-            .connections
-            .iter()
-            .any(|c| matches!(c.to, ConnectionSink::Trigger { .. }))
-            || graph
-                .nodes
-                .iter()
-                .any(|n| matches!(n.kind, NodeKind::Output(_) | NodeKind::SpatialOutput(_)))
-    }
-
     /// Collect every sample transitively referenced by `id` (via `Sample(SampleRef)`
     /// nodes), in stable encounter order, deduped. Used so a bounce goes "dirty"
     /// when an *instrument it embeds* (not just its own graph) changes.
@@ -3259,11 +3176,17 @@ impl EditorController {
         // runs `RELEASE_TAIL` longer so note tails can be folded back onto the
         // loop start. A non-sequence Sound renders as a one-shot.
         const RELEASE_TAIL: f64 = 3.0;
-        let song = Self::graph_is_song(&sample.graph);
+        let song = awsm_audio_player::document::is_sequence(&sample.graph);
         let (graph, parts, control, duration, loop_secs) = if song {
-            let (g, parts, control, loop_len) = self.compile_song(&lib, id);
-            let loop_len = loop_len.max(0.05);
-            (g, parts, control, loop_len + RELEASE_TAIL, Some(loop_len))
+            let sp = awsm_audio_player::document::sequence_parts(&lib, id);
+            let loop_len = sp.loop_secs.max(0.05);
+            (
+                sp.graph,
+                sp.triggers,
+                sp.control,
+                loop_len + RELEASE_TAIL,
+                Some(loop_len),
+            )
         } else {
             (
                 awsm_audio_schema::flatten(&lib, id),
@@ -3326,7 +3249,7 @@ impl EditorController {
             .ok_or_else(|| "not an arrangement".to_string())?;
         let (start, end) = arr.range();
         let duration = (end - start).max(0.05);
-        let clips = self.clips_of(&arr, start);
+        let clips = awsm_audio_player::document::audio_clip_parts(&self.to_library(), id, start);
         if clips.is_empty() {
             return Err("nothing to render (bounce a Sound and drop it on a track)".into());
         }
@@ -3437,141 +3360,6 @@ impl EditorController {
                 }
             }
         });
-    }
-
-    /// Compile a (stored) Sound's `SeqOut→Trigger` wires + control lanes into
-    /// player parts, from schema (so any sample bounces, not just the active one).
-    /// The returned graph is the sample's own graph (instrument-ref nodes stay as
-    /// voice buses; trigger parts target them by node id).
-    fn compile_song(
-        &self,
-        lib: &awsm_audio_schema::SampleLibrary,
-        id: awsm_audio_schema::SampleId,
-    ) -> (
-        awsm_audio_schema::Graph,
-        Vec<awsm_audio_player::TriggerPart>,
-        Vec<awsm_audio_player::ControlLanePart>,
-        f64,
-    ) {
-        use awsm_audio_schema::{ConnectionSink, ConnectionSource, NodeKind};
-        let Some(sample) = lib.sample(id) else {
-            return (
-                awsm_audio_schema::Graph::default(),
-                Vec::new(),
-                Vec::new(),
-                0.0,
-            );
-        };
-        let g = sample.graph.clone();
-        let mut parts = Vec::new();
-        let mut control = Vec::new();
-        // Loop length = the longest explicit playback window, else the content
-        // end (last note). This is exactly what the live transport loops over,
-        // so a loop-bounce of this length repeats bit-for-bit.
-        let mut content_end = 0.0f64;
-        let mut window_secs = 0.0f64;
-        for c in &g.connections {
-            match (&c.from, &c.to) {
-                // Note sequencer → trigger an instrument-ref voice bus.
-                (
-                    ConnectionSource::SeqOut { node: seqn, key },
-                    ConnectionSink::Trigger { node },
-                ) => {
-                    let Some(NodeKind::NoteSequencer(ms)) = g.node(*seqn).map(|n| &n.kind) else {
-                        continue;
-                    };
-                    let Some(outp) = ms.outputs.iter().find(|o| &o.key == key) else {
-                        continue;
-                    };
-                    let Some(track) = ms.song.tracks.get(outp.track) else {
-                        continue;
-                    };
-                    let Some(NodeKind::Sample(sref)) = g.node(*node).map(|n| &n.kind) else {
-                        continue;
-                    };
-                    let instrument = awsm_audio_schema::flatten(lib, sref.sample);
-                    if instrument.nodes.is_empty() {
-                        continue;
-                    }
-                    let base = ms.song.beats_to_secs(ms.start);
-                    let mut notes = Vec::new();
-                    for ev in &track.events {
-                        if let Some(n) = outp.note {
-                            if ev.note != n {
-                                continue;
-                            }
-                        }
-                        if ev.start < ms.start {
-                            continue;
-                        }
-                        if let Some(end) = ms.end {
-                            if ev.start >= end {
-                                continue;
-                            }
-                        }
-                        let semitones = if outp.note.is_some() {
-                            outp.transpose
-                        } else {
-                            ev.note as i32 - 60 + outp.transpose
-                        };
-                        let end = ms.song.beats_to_secs(ev.start + ev.length) - base;
-                        content_end = content_end.max(end);
-                        notes.push(awsm_audio_player::SongVoiceSpec {
-                            start: ms.song.beats_to_secs(ev.start) - base,
-                            end,
-                            semitones,
-                            velocity: ((ev.velocity as f32 / 127.0) * outp.gain).clamp(0.0, 1.0),
-                        });
-                    }
-                    // Loop window = explicit stop, else the authored song length
-                    // (bars); see `arrangement_parts`. Keeps a bounce's loop period
-                    // identical to the live transport's, on the musical boundary.
-                    let win_beats = ms.end.or((ms.length > 0.0).then_some(ms.length));
-                    if let Some(win_end) = win_beats {
-                        let win = ms.song.beats_to_secs(win_end) - base;
-                        window_secs = window_secs.max(win.max(0.05));
-                    }
-                    if !notes.is_empty() {
-                        parts.push(awsm_audio_player::TriggerPart {
-                            target: *node,
-                            instrument,
-                            notes,
-                        });
-                    }
-                }
-                // Control sequencer → automate a node param.
-                (
-                    ConnectionSource::SeqOut { node: seqn, key },
-                    ConnectionSink::NodeParam { node, param },
-                ) => {
-                    let Some(NodeKind::ControlSequencer(cs)) = g.node(*seqn).map(|n| &n.kind)
-                    else {
-                        continue;
-                    };
-                    let Some(lane) = cs.lanes.iter().find(|l| &l.key == key) else {
-                        continue;
-                    };
-                    let bpm = if cs.bpm > 0.0 { cs.bpm } else { 120.0 };
-                    let points = lane
-                        .points
-                        .iter()
-                        .map(|p| (p.beat * 60.0 / bpm, p.value, p.curve))
-                        .collect();
-                    control.push(awsm_audio_player::ControlLanePart {
-                        target: *node,
-                        param: param.0.clone(),
-                        points,
-                    });
-                }
-                _ => {}
-            }
-        }
-        let loop_len = if window_secs > 0.0 {
-            window_secs
-        } else {
-            content_end
-        };
-        (g, parts, control, loop_len)
     }
 
     /// Downsampled `(min, max)` peaks of a Sound's bounced buffer (for drawing a
@@ -4340,7 +4128,9 @@ impl EditorController {
                 self.connections
                     .lock_mut()
                     .push_cloned(Rc::new(EditorConnection {
-                        id: ConnId::new_v4(),
+                        // Honour a wire id the document carried (stable identity
+                        // across save/load); else mint a fresh one.
+                        id: conn.id.unwrap_or_else(ConnId::new_v4),
                         from: f,
                         from_output,
                         to: t,

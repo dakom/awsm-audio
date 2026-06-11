@@ -332,7 +332,11 @@ impl EditorMcp {
     #[tool(
         description = "Full editor snapshot: graph (nodes + connections), node \
         layout, camera, selection, and the active arrangement. The starting point \
-        for discovering node/sample ids."
+        for discovering node ids. Note it is scoped to the ACTIVE sample's canvas \
+        only — call list_samples to see every sample and switch with \
+        set_active_sample. Each connection carries a stable `id` you can pass to \
+        the `disconnect` command to remove that one wire without touching its \
+        endpoint nodes."
     )]
     async fn get_snapshot(&self) -> Result<CallToolResult, McpError> {
         self.query(EditorQuery::Snapshot).await
@@ -398,7 +402,10 @@ impl EditorMcp {
     #[tool(
         description = "Render a Sound offline to a .wav, saved to a temp file; \
         returns the path + byte count. An agent can't hear bytes — open the file \
-        or use wav_stats/waveform to reason about it. Omit `sample` for the root."
+        or use wav_stats/waveform to reason about it. Omit `sample` for the root. \
+        For VERIFYING audio content, prefer `bounce` → wav_stats / waveform: those \
+        keep the audio inside the document and avoid the upload round-trip. Use \
+        render_wav for final exports of short clips."
     )]
     async fn render_wav(
         &self,
@@ -440,7 +447,13 @@ impl EditorMcp {
 
     // ── transport ────────────────────────────────────────────────────────────
 
-    #[tool(description = "Start playback of the root Sound / arrangement.")]
+    #[tool(
+        description = "Start playback of the root Sound / arrangement. With the \
+        transport loop off, a song/arrangement auto-stops and returns to idle when \
+        its content ends (so a later play starts fresh, not mid-timeline); a \
+        free-running audition plays until you call stop. Offline `bounce` / \
+        render_wav are unaffected by transport state."
+    )]
     async fn play(&self) -> Result<CallToolResult, McpError> {
         match self.req(Request::Play).await? {
             Response::Ok => Ok(text("ok")),
@@ -517,18 +530,50 @@ impl EditorMcp {
         description = "Render a Sound (`sample`) offline and store it as that \
         sample's bounce (so it can be dropped into an arrangement). Pass \
         `duration_secs` to capture a fixed span of a procedural / worklet source \
-        that otherwise renders only a tiny default. The render is async — re-query \
-        list_samples / get_bounce_status to confirm it landed."
+        that otherwise renders only a tiny default. Blocks until the render lands \
+        (bounce status → clean) or a ~30 s safety timeout, so you can inspect \
+        wav_stats / waveform immediately after — no manual polling. On timeout it \
+        returns the last status; re-check get_bounce_status / list_assets."
     )]
     async fn bounce(
         &self,
         Parameters(p): Parameters<BounceParams>,
     ) -> Result<CallToolResult, McpError> {
+        use std::time::{Duration, Instant};
+        // Kick off the (async) offline render.
         self.dispatch(EditorCommand::Bounce {
             sample: p.sample,
             duration_secs: p.duration_secs,
         })
-        .await
+        .await?;
+        // Block until it lands instead of making the agent blind-poll: a short
+        // render usually completes within a couple of ticks; the timeout bounds a
+        // long or failed render so the tool can't hang.
+        let timeout = Duration::from_secs(30);
+        let start = Instant::now();
+        loop {
+            let status = match self
+                .query_result(EditorQuery::BounceStatus { sample: p.sample })
+                .await?
+            {
+                QueryResult::BounceStatus(s) => s,
+                other => return Err(unexpected_query(other)),
+            };
+            if status == "clean" {
+                return Ok(text(format!(
+                    "bounce complete (status: clean) for {}",
+                    p.sample
+                )));
+            }
+            if start.elapsed() >= timeout {
+                return Ok(text(format!(
+                    "bounce still '{status}' after {}s — the render may still be \
+                     running or have failed; re-check get_bounce_status / list_assets.",
+                    timeout.as_secs()
+                )));
+            }
+            tokio::time::sleep(Duration::from_millis(150)).await;
+        }
     }
 
     #[tool(
@@ -622,7 +667,10 @@ impl EditorMcp {
         .await
     }
 
-    #[tool(description = "Set a track's linear gain (1.0 = unity) in the active arrangement.")]
+    #[tool(description = "Set a track's linear gain in the active arrangement. \
+        Linear amplitude: 1.0 = unity, 0.5 ≈ −6 dB, 2.0 = +6 dB. The UI knob/slider \
+        spans 0.0–2.0, so unity (1.0) sits at mid-travel by design — that's not an \
+        under-turned knob.")]
     async fn set_track_gain(
         &self,
         Parameters(p): Parameters<TrackGainParams>,
@@ -667,7 +715,9 @@ impl EditorMcp {
         .await
     }
 
-    #[tool(description = "Set a clip's linear gain (1.0 = unity) in the active arrangement.")]
+    #[tool(description = "Set a clip's linear gain in the active arrangement. \
+        Linear amplitude: 1.0 = unity, 0.5 ≈ −6 dB, 2.0 = +6 dB. The UI knob/slider \
+        spans 0.0–2.0, so unity (1.0) sits at mid-travel by design.")]
     async fn set_clip_gain(
         &self,
         Parameters(p): Parameters<ClipGainParams>,
@@ -680,7 +730,10 @@ impl EditorMcp {
         .await
     }
 
-    #[tool(description = "Set the active arrangement's tempo (BPM).")]
+    #[tool(description = "Set the active arrangement's tempo (BPM). A new \
+        arrangement defaults to 120 BPM — set this to your parts' tempo BEFORE \
+        using the stored BPM (e.g. get_arrangement) to compute clip placement, or \
+        clips land at the wrong times.")]
     async fn set_arrangement_bpm(
         &self,
         Parameters(p): Parameters<BpmParams>,
@@ -780,8 +833,10 @@ impl EditorMcp {
     #[tool(
         description = "Convert beats and/or bars to seconds at a given BPM, so you \
         never hand-compute clip start/length. secs = (beats + bars*beats_per_bar) * \
-        60 / bpm. beats_per_bar defaults to 4. The active arrangement's BPM is in \
-        get_arrangement."
+        60 / bpm. beats_per_bar defaults to 4. Pass the BPM your parts were authored \
+        at — `bpm` is explicit here precisely so placement never silently uses the \
+        wrong tempo. The active arrangement's stored BPM (in get_arrangement) \
+        defaults to 120 until you set_arrangement_bpm."
     )]
     async fn beats_to_secs(
         &self,
@@ -919,7 +974,10 @@ impl EditorMcp {
     #[tool(
         description = "Return the recommended Cargo.toml dependency snippet for \
         authoring an awsm-audio WASM DSP worklet (the crates.io release). Paste it \
-        into your worklet crate, then follow the awsm-audio://docs/worklet-abi guide."
+        into your worklet crate, then follow the awsm-audio://docs/worklet-abi guide \
+        (full Rust API: https://docs.rs/awsm-audio-worklet/latest). Use a worklet \
+        when no built-in node does the job — chorus/flanger, phaser, bitcrusher, \
+        ring modulator, custom grain/spectral effects."
     )]
     async fn worklet_cargo_toml(&self) -> Result<CallToolResult, McpError> {
         Ok(text(WORKLET_CARGO_TOML))
@@ -930,9 +988,11 @@ impl EditorMcp {
     #[tool(
         description = "Attach a compiled WASM DSP module to an AudioWorklet node. \
         Author a crate against awsm-audio-worklet (see the awsm-audio://docs/worklet-abi \
-        resource), `cargo build --target wasm32-unknown-unknown --release`, then \
-        pass the .wasm path here. On success the node's discovered params show up \
-        in get_snapshot. A bad module returns the compile/ABI error."
+        resource; crate API at https://docs.rs/awsm-audio-worklet/latest, Cargo.toml \
+        from the worklet_cargo_toml tool), `cargo build --target \
+        wasm32-unknown-unknown --release`, then pass the .wasm path here. On success \
+        the node's discovered params show up in get_snapshot. A bad module returns \
+        the compile/ABI error."
     )]
     async fn attach_wasm(
         &self,
@@ -1150,16 +1210,21 @@ impl ServerHandler for EditorMcp {
             .enable_prompts()
             .build();
         info.instructions = Some(
-            "Drive the awsm-audio node-graph WebAudio editor. Call get_snapshot to \
-             discover node/sample ids, mutate with the graph/sequencer/arrangement \
-             tools (or dispatch_command / dispatch_batch for anything without a \
-             dedicated tool), bounce a Sound and call render_wav / wav_stats / \
-             waveform to inspect the result. To use an external audio sample (a \
+            "Drive the awsm-audio node-graph WebAudio editor. Start with list_samples \
+             (every sample + which is root/active) and get_snapshot (the ACTIVE \
+             sample's canvas — nodes + connections, each wire with a stable id for \
+             disconnect); get_snapshot only shows the active canvas, so use \
+             list_samples + set_active_sample to navigate a multi-sample project. \
+             Mutate with the graph/sequencer/arrangement tools (or dispatch_command / \
+             dispatch_batch for anything without a dedicated tool), bounce a Sound \
+             and call wav_stats / waveform to inspect the result (prefer these over \
+             render_wav for verification). To use an external audio sample (a \
              drum hit, vocal, field recording, impulse response), add_node an \
              audio_buffer_source (or convolver) and load_audio a local file path \
-             or a URL onto it. To add a custom DSP node, read the \
-             awsm-audio://docs/worklet-abi resource, author + build a worklet crate, and \
-             attach it with the attach_wasm tool.\n\n\
+             or a URL onto it. For DSP no built-in node provides — chorus / flanger, \
+             phaser, bitcrusher, ring modulator, custom grain/spectral effects — use \
+             an audio_worklet: read the awsm-audio://docs/worklet-abi resource, author \
+             + build a worklet crate, and attach it with the attach_wasm tool.\n\n\
              For a song / full-track / genre request, work arrangement-first instead \
              of one monolithic root sequencer: build and bounce each part (drums, \
              bass, chords/skank, FX) as its own short loop Sound, then create_arrangement \
@@ -1433,6 +1498,28 @@ graph you're editing.
    `{"cmd":"bind","args":{"from":"<sequencer>","from_output":0,"to":"<sample-ref>"}}`
    (`from_output` indexes the sequencer's `outputs`, one per melodic track / drum
    note). The root Sound is now a "song" — render_wav plays the sequence.
+
+## Building a drum kit
+
+A drum kit is the multi-sample pattern above with a **drum-mode** sequencer: its
+`outputs` are one per distinct note number (GM: 36 kick, 38 snare, 42 closed hat),
+each bound to its own one-shot voice.
+
+1. One instrument Sound per voice (kick / snare / hat / …) — a short percussive
+   graph (e.g. a pitched sine blip, or a noise burst through a filter + envelope).
+2. A song Sound with a drum `note_sequencer`. Author the whole pattern at once —
+   either create the node with an inline `song` (its `outputs` are derived
+   immediately, so binds work right away) or load a track in one shot with
+   `{"cmd":"edit_song","args":{"node":"<seq>","op":{"op":"set_track_events","args":{
+      "track":0,"events":[{"start":0.0,"length":0.5,"note":36,"velocity":110}, …]}}}}`.
+   Each distinct `note` becomes one output (sorted by note number).
+3. `add_sample_ref` per voice; `bind` each sequencer output to the matching voice's
+   trigger (`from_output` = that drum note's index in `outputs` — read them back
+   from get_snapshot / the node's `outputs`).
+4. Wire each Sample-ref's audio output into a bus / Output node, set gains, bounce.
+
+(Binding an output that doesn't exist yet is rejected with a message — author the
+notes/tracks first so the outputs are derived.)
 "#;
 
 /// The worklet-authoring guide served both as the `awsm-audio://docs/worklet-abi`
@@ -1443,6 +1530,11 @@ const WORKLET_ABI_DOC: &str = r#"# Authoring an awsm-audio WASM DSP worklet
 An AudioWorklet node runs a **native Rust → wasm** DSP processor you author,
 compile, and attach. The MCP server only relays the bytes — you compile locally
 (so you get cargo's errors directly) and pass the `.wasm` to `attach_wasm`.
+
+**When to use one:** reach for a worklet whenever no built-in node does the job —
+chorus / flanger (modulated delay), phaser (all-pass chain), bitcrusher, ring
+modulator, custom grain / spectral effects. The full Rust API of the
+`awsm-audio-worklet` crate is at <https://docs.rs/awsm-audio-worklet/latest>.
 
 ## 1. Author a crate
 
@@ -1494,6 +1586,12 @@ ABI rules: stereo (`CHANNELS = 2`), <= `MAX_FRAMES` (128) frames/quantum,
 <= `MAX_PARAMS` (32) params, no allocation in `process`. Use the crate's
 `math::{sin, tanh}` instead of `f32::sin`/`tanh` (those pull extra wasm symbols).
 See `packages/worklets/{gain,ringmod,drive,bitcrusher}` for worked examples.
+
+**`#![no_std]` crates:** a `#![no_std]` cdylib must define a `#[panic_handler]`,
+or the build fails at link with `` error: `#[panic_handler]` function required, but
+not found ``. Don't hand-write it — invoke the macro as `awsm_worklet!(Gain,
+no_std);` and it emits a minimal one for you. (A normal std crate needs nothing
+extra; std supplies the handler.)
 
 ## 2. Compile
 
@@ -1623,6 +1721,12 @@ awsm-audio-worklet = "0.1"
 
 # Build: cargo build -p my-worklet --target wasm32-unknown-unknown --release
 # Attach the resulting .wasm with the attach_wasm tool.
+# Guide: awsm-audio://docs/worklet-abi   API: https://docs.rs/awsm-audio-worklet/latest
+#
+# A std crate (the above) "just works". For a smaller `#![no_std]` crate, call the
+# macro as `awsm_worklet!(MyProc, no_std);` — that form also emits the
+# `#[panic_handler]` a no_std cdylib requires (otherwise the build fails at link
+# with "`#[panic_handler]` function required, but not found").
 "#;
 
 /// A tool argument that is **strongly typed** — its JSON Schema is exactly `T`'s,

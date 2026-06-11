@@ -17,6 +17,7 @@ vars:
   # awsm-renderer dev servers (which live in 9079–9085).
   PORT_EDITOR_DEV: 9170
   PORT_MCP_HTTP_DEV: 9171 # TCP — rmcp /mcp + /editor ws + /debug + /renders
+  PORT_EXAMPLE_DEV: 9172 # the standalone player example (local only, never deployed)
 
   # URLs — dev
   URL_DEV_EDITOR: "http://localhost:{{.PORT_EDITOR_DEV}}"

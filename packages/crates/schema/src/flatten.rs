@@ -96,6 +96,7 @@ fn apply_top_inlets(g: &mut Graph, top_inlets: &[(PortId, f32)]) {
                     let kid = k.id;
                     g.nodes.push(k);
                     g.connections.push(Connection {
+                        id: None,
                         from: ConnectionSource::NodeOutput {
                             node: kid,
                             output: 0,
@@ -218,12 +219,13 @@ fn inline_one(lib: &SampleLibrary, g: &mut Graph, idx: usize) {
                 };
                 match &c.from {
                     ConnectionSource::NodeOutput { .. } => g.connections.push(Connection {
+                        id: None,
                         from: remap_source(&c.from, &idmap),
                         to,
                     }),
                     ConnectionSource::Inlet { port } => {
                         if let Some(from) = wired_inlet(port) {
-                            g.connections.push(Connection { from, to });
+                            g.connections.push(Connection { id: None, from, to });
                         } else {
                             let v = inlet_value(port);
                             if v != 0.0 {
@@ -233,6 +235,7 @@ fn inline_one(lib: &SampleLibrary, g: &mut Graph, idx: usize) {
                                 let kid = k.id;
                                 g.nodes.push(k);
                                 g.connections.push(Connection {
+                                    id: None,
                                     from: ConnectionSource::NodeOutput {
                                         node: kid,
                                         output: 0,
@@ -249,6 +252,7 @@ fn inline_one(lib: &SampleLibrary, g: &mut Graph, idx: usize) {
                 let to_node = idmap[node];
                 match &c.from {
                     ConnectionSource::NodeOutput { .. } => g.connections.push(Connection {
+                        id: None,
                         from: remap_source(&c.from, &idmap),
                         to: ConnectionSink::NodeParam {
                             node: to_node,
@@ -260,6 +264,7 @@ fn inline_one(lib: &SampleLibrary, g: &mut Graph, idx: usize) {
                             // A wired signal modulates the param — native
                             // WebAudio: it sums with the param's value.
                             g.connections.push(Connection {
+                                id: None,
                                 from,
                                 to: ConnectionSink::NodeParam {
                                     node: to_node,
@@ -280,6 +285,7 @@ fn inline_one(lib: &SampleLibrary, g: &mut Graph, idx: usize) {
     for (j, sink) in out_consumers {
         if let Some(src) = outlet_source.get(&j) {
             g.connections.push(Connection {
+                id: None,
                 from: src.clone(),
                 to: sink,
             });

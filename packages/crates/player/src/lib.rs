@@ -2,12 +2,13 @@
 //!
 //! [`Player`] owns the live `AudioContext` and a fixed master chain
 //! (`master gain → analyser → destination`). [`Player::play`] instantiates an
-//! authored [`Graph`] onto the context (see [`build`]) and routes it into the
+//! authored [`Graph`] onto the context (see the `build` module) and routes it into the
 //! master bus; [`Player::stop`] tears the instance down. The analyser exposes
 //! time-domain samples for the editor's waveform view.
 
 pub mod bounce;
 mod build;
+pub mod document;
 mod noise;
 pub mod worklet;
 
@@ -465,6 +466,13 @@ impl Player {
         Ok(())
     }
 
+    /// Resume the audio context — call it from a user-gesture handler (click /
+    /// keypress) to satisfy the browser's autoplay policy before/at the first
+    /// [`play`](Self::play). Idempotent; harmless once running.
+    pub fn resume(&self) {
+        let _ = self.ctx.resume();
+    }
+
     /// Time-domain samples (0..255, 128 = silence) of the Analyser node `id` in
     /// the live graph — for a per-node oscilloscope. Empty if `id` isn't a live
     /// Analyser.
@@ -510,7 +518,7 @@ impl Player {
 
     /// A clone of the decoded/rendered buffer registry (AudioBuffers are
     /// context-independent), for handing to the offline arrangement renderer
-    /// ([`bounce::render_clips`](crate::bounce::render_clips)).
+    /// ([`bounce::render_clips`]).
     pub fn clip_buffers(&self) -> std::collections::HashMap<AssetId, AudioBuffer> {
         self.buffers.clone()
     }
@@ -667,7 +675,7 @@ impl Player {
     /// Schedule one pass of an arrangement's triggered notes starting at absolute
     /// context time `at`. Each [`TriggerPart`] spawns a voice per note — an
     /// instance of its instrument graph — feeding the part's target voice-bus gain
-    /// (found in the arrangement built by [`play_arrangement`]), whose audio then
+    /// (found in the arrangement built by [`play_arrangement`](Self::play_arrangement)), whose audio then
     /// flows through the arrangement to the Output. Scheduled on WebAudio's
     /// sample-accurate clock; finished voices are reclaimed first; capped at
     /// `MAX_SONG_VOICES`. Returns `(scheduled, end_time)`.
@@ -711,11 +719,41 @@ impl Player {
         apply_control(&self.params, parts, at);
     }
 
-    /// Nudge a live AudioParam toward `value`, gliding over ~`glide` seconds
-    /// (`setTargetAtTime`) so sweeps are smooth and click-free. Applies to the
-    /// transport instance *and* every sounding voice (their node ids match the
-    /// active sample's), so a CC sweep moves all held notes at once. No rebuild,
-    /// so held notes keep sounding. No-op where the node/param isn't present.
+    /// Nudge a live AudioParam toward `value` while audio keeps playing — gliding
+    /// over ~`glide` seconds (`setTargetAtTime`, so sweeps are smooth and
+    /// click-free; pass `glide <= 0.0` to jump). No rebuild, so a held note / a
+    /// running drone keeps sounding. No-op where the node/param isn't present.
+    ///
+    /// This is the hook for **driving a playing sound from live application state**
+    /// — move a sound in 3D from a game entity's position, bend an oscillator's
+    /// pitch from a gauge, open a filter as something charges up. `node` is the
+    /// [`NodeId`] from the document; `param` is the WebAudio param name. Call
+    /// [`live_params`](Self::live_params) to discover the exact `(node, param)`
+    /// pairs currently controllable (or pick a node out of the document's graph by
+    /// kind).
+    ///
+    /// Controllable params by node kind:
+    /// - **Oscillator** — `"frequency"`, `"detune"`
+    /// - **Gain** — `"gain"`
+    /// - **BiquadFilter** — `"frequency"`, `"detune"`, `"Q"`, `"gain"`
+    /// - **Panner / SpatialOutput** — `"positionX"`, `"positionY"`, `"positionZ"`
+    ///   (SpatialOutput also `"gain"`); for the *listener*, use
+    ///   [`set_listener`](Self::set_listener)
+    /// - **AudioBufferSource** — `"playbackRate"`, `"detune"`
+    /// - **AudioWorklet** — every declared param, by its name
+    ///
+    /// ```no_run
+    /// # use awsm_audio_player::Player;
+    /// # use awsm_audio_schema::{NodeKind, SampleLibrary, SampleId};
+    /// # fn demo(player: &Player, lib: &SampleLibrary, sample: SampleId) {
+    /// // Find the spatial output node in the played sample, then steer it each frame.
+    /// if let Some(out) = lib.sample(sample).and_then(|s|
+    ///     s.graph.nodes.iter().find(|n| matches!(n.kind, NodeKind::SpatialOutput(_))))
+    /// {
+    ///     player.set_param_live(out.id, "positionX", 3.0, 0.05); // glide to x=3
+    /// }
+    /// # }
+    /// ```
     pub fn set_param_live(&self, node: NodeId, param: &str, value: f32, glide: f64) {
         let now = self.ctx.current_time();
         let apply = |params: &[(NodeId, Vec<(&'static str, web_sys::AudioParam)>)]| {
@@ -733,6 +771,49 @@ impl Player {
             }
         };
         apply(&self.params);
+    }
+
+    /// Every live, controllable `(node, [param names])` in the currently-playing
+    /// graph — exactly the targets [`set_param_live`](Self::set_param_live)
+    /// accepts. Empty until something is playing.
+    ///
+    /// This is the **discoverable** way to do live control: after
+    /// [`play_document`](Self::play_document), ask the engine what's adjustable
+    /// instead of inspecting the document or memorizing per-node params. Pair it
+    /// with the node kinds in the document to build, say, a slider per param.
+    ///
+    /// ```no_run
+    /// # use awsm_audio_player::Player;
+    /// # fn demo(player: &Player) {
+    /// for (node, params) in player.live_params() {
+    ///     for name in params {
+    ///         // e.g. surface a control, or drive it from app state:
+    ///         player.set_param_live(node, name, 1.0, 0.02);
+    ///     }
+    /// }
+    /// # }
+    /// ```
+    ///
+    /// (Reflects the main graph's nodes — a prewired sound, an arrangement graph.
+    /// Per-note voices spawned by a sequencer aren't listed individually.)
+    pub fn live_params(&self) -> Vec<(NodeId, Vec<&'static str>)> {
+        self.params
+            .iter()
+            .map(|(id, ps)| (*id, ps.iter().map(|(name, _)| *name).collect()))
+            .collect()
+    }
+
+    /// The current (base) value of a live param — for initializing a UI control to
+    /// the sound's actual setting. `None` if the node/param isn't live.
+    pub fn param_value(&self, node: NodeId, param: &str) -> Option<f32> {
+        self.params
+            .iter()
+            .find(|(id, _)| *id == node)
+            .and_then(|(_, ps)| {
+                ps.iter()
+                    .find(|(name, _)| *name == param)
+                    .map(|(_, p)| p.value())
+            })
     }
 
     /// Number of scheduled song voices currently alive (for "is sound playing").

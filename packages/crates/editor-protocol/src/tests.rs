@@ -7,10 +7,41 @@ use awsm_audio_schema::{Clip, NodeId, NodeKind, NoteEvent, SampleId};
 use serde_json::Value;
 
 use crate::{
-    ArrangeOp, Clipboard, EditorCommand, EditorQuery, FieldInfo, FieldValue, NodeKindInfo,
-    QueryResult, RenderHandle, Request, Response, SampleInfo, SongOp, TransportInfo, WavStats,
-    WaveformEnvelope,
+    ArrangeOp, Clipboard, EditorCommand, EditorProject, EditorQuery, FieldInfo, FieldValue,
+    NodeKindInfo, NodeLayout, QueryResult, RenderHandle, Request, Response, SampleInfo, SongOp,
+    TransportInfo, WavStats, WaveformEnvelope,
 };
+
+/// The directory-save path serializes an [`EditorProject`] with `to_string_pretty`
+/// and writes `project.toml`. TOML rejects a scalar key emitted after a table, so
+/// the project's scalar view-state (pan/zoom) must precede its table fields
+/// (library/layout) — otherwise the save errors out and leaves an empty folder.
+#[test]
+fn editor_project_serializes_to_toml() {
+    for (name, library) in awsm_audio_schema::examples::all() {
+        let project = EditorProject {
+            library,
+            layout: vec![NodeLayout {
+                id: NodeId::new(),
+                x: 1.0,
+                y: 2.0,
+            }],
+            pan_x: 3.0,
+            pan_y: 4.0,
+            zoom: 1.5,
+        };
+        // Mirrors `EditorController::save_to_dir`.
+        let toml = toml::to_string_pretty(&project)
+            .unwrap_or_else(|e| panic!("save serializes project.toml for '{name}': {e}"));
+        let back: EditorProject = toml::from_str(&toml)
+            .unwrap_or_else(|e| panic!("reload parses project.toml for '{name}': {e}"));
+        assert_eq!(
+            serde_json::to_value(&project).unwrap(),
+            serde_json::to_value(&back).unwrap(),
+            "project.toml round-trip mismatch for '{name}'"
+        );
+    }
+}
 
 /// JSON round-trip: encode → decode → re-encode and assert the two JSON values
 /// match. Proves both directions of the wire codec without needing `PartialEq`.

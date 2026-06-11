@@ -54,6 +54,15 @@ pub fn can_connect(emit: Emit, accept: Accept) -> bool {
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Connection {
+    /// Stable wire id — the same id the editor's `disconnect` command expects, so
+    /// a snapshot's wires can be removed surgically (without tearing down an
+    /// endpoint node). Present in editor snapshots; omitted (and `None`) in the
+    /// portable saved document, where wires are pure `from`/`to` edges. When a
+    /// loaded document *does* carry one, the editor honours it so the wire keeps
+    /// a stable identity across save/load.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "schemars", schemars(with = "Option<String>"))]
+    pub id: Option<uuid::Uuid>,
     pub from: ConnectionSource,
     pub to: ConnectionSink,
 }
@@ -62,6 +71,7 @@ impl Connection {
     /// Node-output → node-input on output/input index 0 (the common case).
     pub fn node_to_node(from: NodeId, to: NodeId) -> Self {
         Self {
+            id: None,
             from: ConnectionSource::NodeOutput {
                 node: from,
                 output: 0,
@@ -73,6 +83,7 @@ impl Connection {
     /// Node-output → another node's param (modulation), output index 0.
     pub fn node_to_param(from: NodeId, to: NodeId, param: impl Into<ParamId>) -> Self {
         Self {
+            id: None,
             from: ConnectionSource::NodeOutput {
                 node: from,
                 output: 0,

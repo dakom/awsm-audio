@@ -5,6 +5,7 @@ members = [
     "packages/crates/worklet",
     "packages/crates/editor-protocol",
     "packages/frontend/editor",
+    "packages/frontend/example",
     "packages/mcp",
     "packages/worklets/bitcrusher",
     "packages/worklets/drive",

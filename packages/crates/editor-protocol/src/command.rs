@@ -44,24 +44,33 @@ pub enum EditorCommand {
         param: String,
         events: Vec<AutomationEvent>,
     },
-    /// Wire an output port to an input port.
+    /// Wire an output port to an input port. `from_output` / `to_input` default
+    /// to 0 (the common single-port case) when omitted — so a bare
+    /// `{from, to}` connects port 0 → port 0 via dispatch_command / dispatch_batch
+    /// too, matching the dedicated `connect` tool.
     Connect {
         from: NodeId,
+        #[serde(default)]
         from_output: u32,
         to: NodeId,
+        #[serde(default)]
         to_input: u32,
     },
     /// Wire an output port to a node's automatable parameter (modulation).
+    /// `from_output` defaults to 0 when omitted.
     Modulate {
         from: NodeId,
+        #[serde(default)]
         from_output: u32,
         to: NodeId,
         param: ParamId,
     },
     /// Bind a sequencer's keyed output (`from_output` = its sound/lane/zone port)
     /// to an instrument-ref's trigger inlet — a `SeqOut → Trigger` wire.
+    /// `from_output` defaults to 0 when omitted.
     Bind {
         from: NodeId,
+        #[serde(default)]
         from_output: u32,
         to: NodeId,
     },
@@ -177,6 +186,13 @@ pub enum SongOp {
     RemoveNote {
         track: usize,
         index: usize,
+    },
+    /// Replace **all** events of one track in a single op (and regenerate its
+    /// sound outputs). Lets a full pattern land in one round-trip instead of one
+    /// AddNote per note. Out-of-range `track` is ignored.
+    SetTrackEvents {
+        track: usize,
+        events: Vec<NoteEvent>,
     },
     SetOutputTranspose {
         index: usize,

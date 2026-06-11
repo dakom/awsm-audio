@@ -13,6 +13,7 @@ use std::time::Duration;
 
 use anyhow::Result;
 use axum::body::Bytes;
+use axum::extract::DefaultBodyLimit;
 use axum::extract::ws::WebSocketUpgrade;
 use axum::http::{StatusCode, header};
 use axum::response::IntoResponse;
@@ -31,6 +32,14 @@ use crate::mcp::EditorMcp;
 /// Cap on retained render files (bounds temp-dir disk use). Renders past this are
 /// evicted oldest-first and their files deleted.
 const MAX_RETAINED_RENDERS: usize = 32;
+
+/// Body-size cap for a render upload. The editor POSTs raw PCM here; even a short
+/// stereo 48 kHz f32 render is multi-MB (10 s ≈ 3.8 MB, 30 s ≈ 11 MB), well past
+/// Axum's 2 MB default — which silently 413'd any non-trivial `render_wav`. This
+/// is a loopback-only side-channel from a trusted local editor, so the cap exists
+/// only to bound memory (the body is buffered before the temp-file write): 512 MB
+/// covers ~20 min of stereo audio.
+const RENDER_BODY_LIMIT: usize = 512 * 1024 * 1024;
 
 /// On-disk path the editor's render upload lands at (and `render_wav` reads back).
 /// Both sides agree on this naming so the tool needs no shared in-memory map.
@@ -82,8 +91,14 @@ pub async fn serve(addr: SocketAddr, link: EditorLink) -> Result<()> {
         .route("/editor", get(editor_ws))
         .route("/debug", post(debug))
         // The render side-channel: the editor POSTs `.wav` bytes here (off the
-        // control link); humans/tools GET them back.
-        .route("/renders/{id}", post(render_upload).get(render_download))
+        // control link); humans/tools GET them back. Raise the body cap well past
+        // Axum's 2 MB default so multi-MB PCM uploads aren't silently rejected.
+        .route(
+            "/renders/{id}",
+            post(render_upload)
+                .get(render_download)
+                .layer(DefaultBodyLimit::max(RENDER_BODY_LIMIT)),
+        )
         // The load side-channel: `load_audio` hosts agent-local audio files here
         // for the editor to fetch (off the control link).
         .route("/assets/{id}", get(asset_download))

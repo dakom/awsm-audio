@@ -1,0 +1,28 @@
+version: "3"
+
+# The standalone player example: a small Trunk frontend that loads built-in
+# example projects and plays them with `awsm-audio-player`. Local only — it has
+# no production build and is never deployed.
+
+includes:
+  config:
+    taskfile: ../config.yml
+    flatten: true
+
+vars:
+  PATH_CRATE: '{{joinPath .PATH_FRONTENDS "example"}}'
+
+tasks:
+  dev:
+    desc: "example: trunk serve the standalone player demo (local only)"
+    cmds:
+      - >
+        cd {{.PATH_CRATE}} &&
+        trunk serve --port {{.PORT_EXAMPLE_DEV}}
+        --watch "{{.PATH_CRATE}}"
+        --watch "{{.PATH_CRATE_PLAYER}}"
+
+  clean:
+    desc: "example: remove the trunk dist output"
+    cmds:
+      - rm -rf {{joinPath .PATH_CRATE "dist"}}

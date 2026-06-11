@@ -140,6 +140,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "awsm-audio-example"
+version = "0.1.1"
+dependencies = [
+ "anyhow",
+ "awsm-audio-player",
+ "awsm-audio-schema",
+ "console_error_panic_hook",
+ "dominator",
+ "futures-signals",
+ "js-sys",
+ "tracing",
+ "tracing-wasm",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "web-sys",
+]
+
+[[package]]
 name = "awsm-audio-mcp"
 version = "0.1.1"
 dependencies = [
@@ -166,7 +184,9 @@ version = "0.1.1"
 dependencies = [
  "anyhow",
  "awsm-audio-schema",
+ "base64",
  "fastrand",
+ "futures",
  "js-sys",
  "thiserror 2.0.18",
  "tracing",

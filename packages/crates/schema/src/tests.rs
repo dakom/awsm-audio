@@ -27,6 +27,7 @@ fn voice_sample() -> Sample {
     s.graph.connect(Connection::node_to_node(osc, filter));
     s.graph.connect(Connection::node_to_node(filter, gain));
     s.graph.connect(Connection {
+        id: None,
         from: ConnectionSource::NodeOutput {
             node: gain,
             output: 0,
@@ -41,6 +42,7 @@ fn voice_sample() -> Sample {
         default: 800.0,
     });
     s.graph.connect(Connection {
+        id: None,
         from: ConnectionSource::Inlet {
             port: "cutoff".into(),
         },
@@ -84,6 +86,7 @@ fn composite_library() -> SampleLibrary {
     master.graph.connect(Connection::node_to_node(v1, bus));
     master.graph.connect(Connection::node_to_node(v2, bus));
     master.graph.connect(Connection {
+        id: None,
         from: ConnectionSource::NodeOutput {
             node: bus,
             output: 0,
@@ -347,6 +350,7 @@ fn input_value_sets_param_on_flatten() {
     });
     sub.graph.outlets.push(PortDecl::new("out"));
     sub.graph.connect(Connection {
+        id: None,
         from: ConnectionSource::Inlet {
             port: "level".into(),
         },
@@ -356,6 +360,7 @@ fn input_value_sets_param_on_flatten() {
         },
     });
     sub.graph.connect(Connection {
+        id: None,
         from: ConnectionSource::NodeOutput { node: g, output: 0 },
         to: ConnectionSink::Outlet {
             port: PortId::from("out"),
@@ -406,6 +411,7 @@ fn inlet_to_param_survives_flatten() {
     voice.graph.outlets.push(PortDecl::new("out"));
     // inlet "freq" -> osc.frequency (a NodeParam sink = modulation).
     voice.graph.connect(Connection {
+        id: None,
         from: ConnectionSource::Inlet {
             port: PortId::from("freq"),
         },
@@ -415,6 +421,7 @@ fn inlet_to_param_survives_flatten() {
         },
     });
     voice.graph.connect(Connection {
+        id: None,
         from: ConnectionSource::NodeOutput {
             node: osc,
             output: 0,
@@ -436,6 +443,7 @@ fn inlet_to_param_survives_flatten() {
         inputs: vec![],
     })));
     root.graph.connect(Connection {
+        id: None,
         from: ConnectionSource::NodeOutput { node: k, output: 0 },
         to: ConnectionSink::NodeInput {
             node: vref,
@@ -496,6 +504,7 @@ fn root_inlet_default_bakes_into_param() {
         default: 800.0,
     });
     root.graph.connect(Connection {
+        id: None,
         from: ConnectionSource::Inlet {
             port: "cutoff".into(),
         },
@@ -619,6 +628,7 @@ fn keyed_connections_and_sample_kind_round_trip() {
     )));
     let inst = g.push_node(Node::new(NodeKind::Bus(BusNode::default())));
     g.connect(Connection {
+        id: None,
         from: ConnectionSource::SeqOut {
             node: seq,
             key: "t0".into(),
@@ -829,6 +839,7 @@ fn validate_rejects_incompatible_wire() {
         ControlSequencerNode::default(),
     )));
     s.graph.connect(Connection {
+        id: None,
         from: ConnectionSource::SeqOut {
             node: ctl,
             key: "lane".into(),

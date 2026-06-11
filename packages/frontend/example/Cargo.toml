@@ -1,0 +1,35 @@
+[package]
+name = "awsm-audio-example"
+publish = false  # local demo, not released to crates.io and not deployed
+description = "Runnable example: load an awsm-audio project and play it with awsm-audio-player."
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+authors.workspace = true
+rust-version.workspace = true
+repository.workspace = true
+
+# wasm-only Trunk frontend — exclude from cargo-dist's prebuilt-binary packaging.
+[package.metadata.dist]
+dist = false
+
+[dependencies]
+# The whole point: drive the same playback engine the editor uses.
+awsm-audio-player = { workspace = true }
+awsm-audio-schema = { workspace = true }
+
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tracing-wasm = { workspace = true }
+console_error_panic_hook = { workspace = true }
+wasm-bindgen = { workspace = true }
+wasm-bindgen-futures = { workspace = true }
+js-sys = { workspace = true }
+
+dominator = { workspace = true }
+futures-signals = { workspace = true }
+
+[dependencies.web-sys]
+workspace = true
+# On top of the workspace baseline: read input/slider values + a rAF handle.
+features = ["HtmlInputElement"]

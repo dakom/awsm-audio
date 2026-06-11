@@ -10,6 +10,8 @@ includes:
     flatten: true
   editor:
     taskfile: ./taskfiles/frontend/editor.yml
+  example:
+    taskfile: ./taskfiles/frontend/example.yml
   mcp:
     taskfile: ./taskfiles/mcp.yml
   crates:
@@ -33,6 +35,12 @@ tasks:
       - editor:dev
       - mcp:serve
 
+  example-dev:
+    desc: "Run the standalone player example locally (http://localhost:9172) — not deployed."
+    cmds:
+      - task: worklets
+      - task: example:dev
+
   build:
     desc: "Build every frontend for production into .build-artifacts/"
     cmds:
@@ -43,6 +51,38 @@ tasks:
     desc: "Remove every frontend's dist + .build-artifacts output"
     cmds:
       - task: editor:clean
+      - task: example:clean
+
+  publish:
+    desc: "Release a version end-to-end — bump → commit → tag → publish crates → deploy editor → push. Usage: task publish -- <version>  (e.g. task publish -- 0.2.0)"
+    vars:
+      VERSION: "{{.CLI_ARGS}}"
+    preconditions:
+      - sh: 'test -n "{{.VERSION}}"'
+        msg: "No version given. Usage: task publish -- <version>   (e.g. task publish -- 0.2.0)"
+      - sh: "git diff --quiet && git diff --cached --quiet"
+        msg: "Working tree is dirty — commit or stash before releasing."
+    cmds:
+      - echo "▶ Releasing v{{.VERSION}} …"
+      # 1. Bump the single version source (members inherit it). Scoped to the
+      #    [workspace.package] section so it never touches a dependency's version.
+      - sed -i.bak -E '/^\[workspace\.package\]/,/^\[/ s/^version = "[^"]*"/version = "{{.VERSION}}"/' Cargo.toml
+      - rm -f Cargo.toml.bak
+      # Refresh Cargo.lock with the new member versions (and sanity-build the tree).
+      - cargo check --workspace --quiet
+      # 2. Commit.
+      - git add Cargo.toml Cargo.lock
+      - git commit -m "Release v{{.VERSION}}"
+      # 3. Tag (annotated, so `git push --follow-tags` ships it; the tag triggers the
+      #    cargo-dist MCP-server release on CI).
+      - git tag -a "v{{.VERSION}}" -m "v{{.VERSION}}"
+      # 4. Publish the library crates (schema → player → worklet) to crates.io.
+      - task: crates:publish
+      # 5. Deploy the editor frontend to Cloudflare Pages.
+      - task: editor:deploy
+      # 6. Push the branch + the new tag.
+      - git push --follow-tags
+      - echo "✅ v{{.VERSION}} — crates published, editor deployed, tag pushed (MCP release building on CI)."
 
   lint:
     desc: "Run rustfmt + clippy with -D warnings (mirrors CI: wasm32 + host)."

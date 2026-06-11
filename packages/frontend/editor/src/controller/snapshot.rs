@@ -17,8 +17,18 @@ use super::EditorController;
 impl EditorController {
     /// Project the canvas into a pure-audio schema [`Graph`] (no layout).
     /// Boundary nodes become `inlets`/`outlets` (ordered top-to-bottom) and the
-    /// connections touching them become `Inlet`/`Outlet` endpoints.
+    /// connections touching them become `Inlet`/`Outlet` endpoints. Saved/played
+    /// graphs (no wire ids — they're editor-session-local); use
+    /// [`build_graph`](Self::build_graph) directly for an id-bearing snapshot.
     pub fn to_graph(&self) -> Graph {
+        self.build_graph(false)
+    }
+
+    /// As [`to_graph`](Self::to_graph), but `with_ids` stamps each wire with its
+    /// stable editor [`ConnId`](super::ConnId) — what the live **snapshot** carries
+    /// so an agent can `disconnect` a single wire by id. The saved document path
+    /// leaves them off (`false`) so portable graphs stay pure `from`/`to` edges.
+    pub fn build_graph(&self, with_ids: bool) -> Graph {
         use super::BoundaryPort;
         use awsm_audio_schema::{PortDecl, PortId};
         let lock = self.nodes.lock_ref();
@@ -100,7 +110,11 @@ impl EditorController {
                         super::ConnSink::Trigger => ConnectionSink::Trigger { node: c.to.id },
                     }
                 };
-                Connection { from, to }
+                Connection {
+                    id: with_ids.then_some(c.id),
+                    from,
+                    to,
+                }
             })
             .collect();
 
@@ -317,7 +331,8 @@ impl EditorController {
         let (pan_x, pan_y) = self.pan.get();
 
         EditorSnapshot {
-            graph: self.to_graph(),
+            // Snapshots carry wire ids so an agent can `disconnect` one surgically.
+            graph: self.build_graph(true),
             layout,
             pan_x,
             pan_y,

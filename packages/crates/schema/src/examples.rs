@@ -51,12 +51,14 @@ fn nested() -> SampleLibrary {
     voice.graph.inlets.push(PortDecl::new("in"));
     voice.graph.outlets.push(PortDecl::new("out"));
     voice.graph.connect(Connection {
+        id: None,
         from: ConnectionSource::Inlet {
             port: PortId::from("in"),
         },
         to: ConnectionSink::NodeInput { node: lp, input: 0 },
     });
     voice.graph.connect(Connection {
+        id: None,
         from: ConnectionSource::NodeOutput {
             node: lp,
             output: 0,
@@ -125,6 +127,7 @@ fn chord() -> SampleLibrary {
     });
     voice.graph.outlets.push(PortDecl::new("out"));
     voice.graph.connect(Connection {
+        id: None,
         from: ConnectionSource::Inlet {
             port: PortId::from("pitch"),
         },
@@ -134,6 +137,7 @@ fn chord() -> SampleLibrary {
         },
     });
     voice.graph.connect(Connection {
+        id: None,
         from: ConnectionSource::Inlet {
             port: PortId::from("cutoff"),
         },
@@ -145,6 +149,7 @@ fn chord() -> SampleLibrary {
     voice.graph.connect(Connection::node_to_node(saw, lp));
     voice.graph.connect(Connection::node_to_node(lp, amp));
     voice.graph.connect(Connection {
+        id: None,
         from: ConnectionSource::NodeOutput {
             node: amp,
             output: 0,
@@ -265,6 +270,7 @@ fn acidrack() -> SampleLibrary {
         &mut assets,
     );
     fx.graph.connect(Connection {
+        id: None,
         from: ConnectionSource::Inlet {
             port: PortId::from("in"),
         },
@@ -272,6 +278,7 @@ fn acidrack() -> SampleLibrary {
     });
     fx.graph.connect(Connection::node_to_node(cr, rm));
     fx.graph.connect(Connection {
+        id: None,
         from: ConnectionSource::NodeOutput {
             node: rm,
             output: 0,
@@ -282,6 +289,7 @@ fn acidrack() -> SampleLibrary {
     });
     // Control inputs set the worklet params.
     fx.graph.connect(Connection {
+        id: None,
         from: ConnectionSource::Inlet {
             port: PortId::from("crush"),
         },
@@ -291,6 +299,7 @@ fn acidrack() -> SampleLibrary {
         },
     });
     fx.graph.connect(Connection {
+        id: None,
         from: ConnectionSource::Inlet {
             port: PortId::from("ring"),
         },
@@ -491,6 +500,7 @@ fn biquad(ty: BiquadFilterType, frequency: AudioParam, q: f32) -> NodeKind {
 /// with a `gain` "depth" node to scale the ±1 oscillator to the param's range.
 fn modulate(from: NodeId, to: NodeId, param: &str) -> Connection {
     Connection {
+        id: None,
         from: ConnectionSource::NodeOutput {
             node: from,
             output: 0,
@@ -1217,6 +1227,7 @@ fn song() -> SampleLibrary {
     // Trigger wires: each keyed sound output → its instrument's trigger inlet.
     let trig = |arr: &mut Sample, seq, key: &str, to| {
         arr.graph.connect(Connection {
+            id: None,
             from: ConnectionSource::SeqOut {
                 node: seq,
                 key: key.to_string(),

@@ -86,6 +86,72 @@ fn tabs() -> Vec<Tab> {
             ],
         ),
         (
+            "Using the MCP",
+            vec![
+                (
+                    "What it is",
+                    vec![
+                        "awsm-audio ships an MCP server: it lets an AI agent (or any \
+                         MCP client) drive this editor — add and wire nodes, sequence \
+                         notes, bounce Sounds, arrange clips, and render audio — \
+                         entirely through typed tool calls. The agent works the same \
+                         canvas you do; you watch it build in real time.",
+                        "The loop has three pieces, all required: the MCP server, an \
+                         attached editor tab (this page — the audio truth), and your \
+                         agent. Set them up in that order.",
+                    ],
+                ),
+                (
+                    "1 · Install the server",
+                    vec![
+                        "Prebuilt binaries — no toolchain needed.",
+                        "• macOS / Linux:",
+                        "$ curl --proto '=https' --tlsv1.2 -LsSf https://github.com/dakom/awsm-audio/releases/latest/download/awsm-audio-mcp-installer.sh | sh",
+                        "• Windows (PowerShell):",
+                        "$ powershell -ExecutionPolicy Bypass -c \"irm https://github.com/dakom/awsm-audio/releases/latest/download/awsm-audio-mcp-installer.ps1 | iex\"",
+                        "• From source (needs Rust):",
+                        "$ cargo install --git https://github.com/dakom/awsm-audio awsm-audio-mcp",
+                    ],
+                ),
+                (
+                    "2 · Run it in a terminal",
+                    vec![
+                        "Start the server and leave it running (it defaults to port \
+                         9171):",
+                        "$ awsm-audio-mcp",
+                        "It listens on http://127.0.0.1:9171 — /mcp for agents, plus a \
+                         WebSocket the editor dials out to. Pass --port to change it.",
+                    ],
+                ),
+                (
+                    "3 · Connect this editor",
+                    vec![
+                        "Two ways to attach the tab to a running server:",
+                        "• Click the MCP button in the top bar and enter the server's \
+                         host:port (e.g. 127.0.0.1:9171), then Connect.",
+                        "• Or open the editor with a ?mcp= parameter to auto-connect:",
+                        "$ http://localhost:9170/?mcp=127.0.0.1:9171",
+                        "The ?mcp= value is a bare host:port. For a TLS-terminated \
+                         remote server, add &tls=true (or tick the box in the connect \
+                         modal). When attached, the MCP button shows “MCP ✓” and a \
+                         🤖 working / idle chip tells you when the agent is editing.",
+                    ],
+                ),
+                (
+                    "4 · Point your agent at it",
+                    vec![
+                        "Add the server to your agent's MCP config — for example an \
+                         .mcp.json (Claude Code, Cursor, and others read this):",
+                        "$ { \"mcpServers\": { \"awsm-audio\": { \"type\": \"http\", \"url\": \"http://127.0.0.1:9171/mcp\" } } }",
+                        "Then just ask: “build me a techno loop”, “add a reverb to \
+                         this”, “bounce it and lay out an arrangement”. The agent \
+                         discovers every node and command from the server's typed \
+                         schema — no guesswork.",
+                    ],
+                ),
+            ],
+        ),
+        (
             "Sounds",
             vec![
                 (
@@ -365,7 +431,15 @@ fn view() -> Dom {
                     .style("align-items", "center")
                     .style("justify-content", "space-between")
                     .style("padding", "18px 22px 10px")
-                    .child(html!("h2", { .style("margin", "0").style("font-size", "17px").style("font-weight", "650").text("Using awsm-audio") }))
+                    .child(html!("div", {
+                        .child(html!("h2", { .style("margin", "0").style("font-size", "17px").style("font-weight", "650").text("Using awsm-audio") }))
+                        .child(html!("div", {
+                            .style("margin-top", "2px")
+                            .style("font-size", "12px")
+                            .style("color", "var(--text-2)")
+                            .text("A modular WebAudio studio — playable by you or by an AI agent.")
+                        }))
+                    }))
                     .child(html!("button", {
                         .style_unchecked("border", "none")
                         .style("background", "transparent")
@@ -414,7 +488,41 @@ fn view() -> Dom {
                         }))
                     })))
                 }))
+                // Footer (fixed): credits + repo link.
+                .child(footer())
             }))
+        }))
+    })
+}
+
+/// The modal footer: attribution and a link to the source repository.
+fn footer() -> Dom {
+    html!("div", {
+        .style("display", "flex")
+        .style("align-items", "center")
+        .style("justify-content", "space-between")
+        .style("gap", "12px")
+        .style("flex-wrap", "wrap")
+        .style("padding", "11px 22px")
+        .style("border-top", "1px solid var(--line)")
+        .style("font-size", "12px")
+        .style("color", "var(--text-2)")
+        .child(html!("span", {
+            .text("Created by David Komer")
+        }))
+        .child(html!("a", {
+            .attr("href", "https://github.com/dakom/awsm-audio")
+            .attr("target", "_blank")
+            .attr("rel", "noopener noreferrer")
+            .attr("title", "Source on GitHub")
+            .style("display", "inline-flex")
+            .style("align-items", "center")
+            .style("gap", "5px")
+            .style("color", "var(--accent-bright)")
+            .style("text-decoration", "none")
+            .style("font-weight", "600")
+            .child(html!("span", { .text("github.com/dakom/awsm-audio") }))
+            .child(html!("span", { .style("font-size", "11px").style("opacity", "0.85").text("↗") }))
         }))
     })
 }
@@ -429,11 +537,34 @@ fn section(heading: &str, items: Vec<&'static str>) -> Dom {
             .style("color", "var(--accent-bright)")
             .text(heading)
         }))
-        .children(items.into_iter().map(|t| html!("p", {
-            .style("margin", "0 0 5px")
-            .style("color", "var(--text-1)")
-            .style("padding-left", if t.starts_with('•') { "10px" } else { "0" })
-            .text(t)
-        })))
+        .children(items.into_iter().map(paragraph))
+    })
+}
+
+/// One help paragraph. A leading "$ " marks a copyable code block (commands,
+/// URLs, config); a leading "•" indents as a bullet; anything else is prose.
+fn paragraph(t: &'static str) -> Dom {
+    if let Some(code) = t.strip_prefix("$ ") {
+        return html!("pre", {
+            .style("margin", "4px 0 8px")
+            .style("padding", "8px 11px")
+            .style("background", "var(--bg-1)")
+            .style("border", "1px solid var(--line)")
+            .style("border-radius", "6px")
+            .style("font-family", "ui-monospace, SFMono-Regular, Menlo, Consolas, monospace")
+            .style("font-size", "12px")
+            .style("line-height", "1.5")
+            .style("color", "var(--text-0)")
+            .style("white-space", "pre-wrap")
+            .style("overflow-wrap", "anywhere")
+            .style("user-select", "all")
+            .text(code)
+        });
+    }
+    html!("p", {
+        .style("margin", "0 0 5px")
+        .style("color", "var(--text-1)")
+        .style("padding-left", if t.starts_with('•') { "10px" } else { "0" })
+        .text(t)
     })
 }

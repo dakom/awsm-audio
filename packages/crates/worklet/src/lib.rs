@@ -118,8 +118,37 @@ pub trait Processor {
 
 /// Generate the awsm-audio worklet ABI exports for a [`Processor`] type. Invoke
 /// exactly once at crate root.
+///
+/// Two forms:
+/// - `awsm_worklet!(MyProc);` — for a normal (std) crate; std supplies the
+///   panic handler the final `cdylib` needs.
+/// - `awsm_worklet!(MyProc, no_std);` — for a `#![no_std]` crate: *also* emits a
+///   minimal `#[panic_handler]`. A `#![no_std]` cdylib **must** define one, and
+///   without it the build fails at link with the cryptic
+///   `` error: `#[panic_handler]` function required, but not found ``. Use this
+///   form (don't hand-write the handler) so the no_std path is turnkey.
+///
+/// ```ignore
+/// #![no_std]
+/// use awsm_audio_worklet::*;
+/// // ... impl Processor for MyProc ...
+/// awsm_worklet!(MyProc, no_std); // emits the ABI exports + a panic handler
+/// ```
 #[macro_export]
 macro_rules! awsm_worklet {
+    // `#![no_std]` crates: the regular ABI exports plus the required panic
+    // handler (a bare spin — DSP code shouldn't panic on the audio thread, and
+    // there's nowhere to unwind to). Don't combine with another crate that also
+    // defines `#[panic_handler]` (e.g. `panic-halt`), or you'll get a duplicate
+    // lang-item error.
+    ($ty:ty, no_std) => {
+        $crate::awsm_worklet!($ty);
+
+        #[panic_handler]
+        fn __awsm_worklet_panic(_: &::core::panic::PanicInfo) -> ! {
+            loop {}
+        }
+    };
     ($ty:ty) => {
         static mut __AWSM_INPUT: [f32; $crate::CHANNELS * $crate::MAX_FRAMES] =
             [0.0; $crate::CHANNELS * $crate::MAX_FRAMES];

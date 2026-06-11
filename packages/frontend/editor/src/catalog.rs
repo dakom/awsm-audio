@@ -230,10 +230,15 @@ fn doc_body(kind: &NodeKind) -> &'static str {
              splitter."
         }
         NodeKind::AudioWorklet(_) => {
-            "Runs your own DSP from a .wasm module (mono in → mono out). Pick a .wasm that \
+            "Runs your own DSP from a .wasm module (stereo in → stereo out). Pick a .wasm that \
              exports the awsm-audio worklet ABI; its parameters are auto-discovered and become \
              editable, automatable, modulation-targetable knobs like any other node. The escape \
-             hatch for anything the built-in nodes can't do."
+             hatch for anything the built-in nodes can't do. Reach for it when you need DSP no \
+             built-in node provides: chorus / flanger (modulated delay), phaser (all-pass \
+             chain), bitcrusher, ring modulator, custom grain / spectral effects. To author one, \
+             read the awsm-audio://docs/worklet-abi resource (crate API at \
+             https://docs.rs/awsm-audio-worklet/latest), get a Cargo.toml from the \
+             worklet_cargo_toml tool, build to wasm32, and attach with attach_wasm."
         }
         NodeKind::Output(_) => {
             "The audible output (speakers) — a plain stereo sink. Wire your final mix into it \

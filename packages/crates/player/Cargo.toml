@@ -19,6 +19,8 @@ rustdoc-args = ["--cfg=web_sys_unstable_apis"]
 awsm-audio-schema = { workspace = true }
 
 fastrand = { workspace = true }
+futures = { workspace = true }
+base64 = { workspace = true }
 anyhow = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }

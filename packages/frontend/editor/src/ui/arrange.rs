@@ -1199,9 +1199,14 @@ fn track_header(arr: &Arrangement, ti: usize) -> Dom {
                 .attr("type", "range").attr("min", "0").attr("max", "2").attr("step", "0.01")
                 .attr("value", &format!("{gain}"))
                 .style("flex", "1").style("min-width", "0")
-                .attr("title", "Track volume")
+                .attr("title", "Track volume (1.0 = unity; release to apply)")
                 .with_node!(el => {
-                    .event(move |_: events::Input| {
+                    // Commit on `change` (drag release), NOT `input`: SetTrackGain
+                    // bumps `samples_rev`, which rebuilds this whole view — doing
+                    // that on every `input` tick recreates the slider mid-drag and
+                    // the drag dies. The browser moves the thumb natively during
+                    // the drag; we apply the value once, on release.
+                    .event(move |_: events::Change| {
                         if let Ok(v) = el.value().parse::<f32>() {
                             controller().dispatch(EditorCommand::EditArrange { op: ArrangeOp::SetTrackGain { track: ti, gain: v } });
                         }
