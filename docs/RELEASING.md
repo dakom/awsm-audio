@@ -23,11 +23,9 @@ task editor:deploy     # production trunk build + wrangler deploy (project: awsm
 
 Needs `CLOUDFLARE_DEPLOY_WORKERS_TOKEN` in the repo-root `.env`; the project name
 and branch come from `taskfiles/config.yml`. The task ensures the Pages project
-exists, then deploys the built `.build-artifacts/editor` tree.
-
-> Independently, every push to `main` also publishes the editor to **GitHub Pages**
-> (`https://dakom.github.io/awsm-audio/editor/`) via `.github/workflows/pages.yml`
-> — that one is automatic, no command needed.
+exists, then deploys the built `.build-artifacts/editor` tree. Deploys are
+**manual** (run the task, or `task publish` which folds it in) — there is no CI
+auto-deploy.
 
 ## 2. Library crates → crates.io
 
