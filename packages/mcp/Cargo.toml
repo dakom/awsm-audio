@@ -9,7 +9,7 @@ version.workspace = true
 license.workspace = true
 authors.workspace = true
 repository.workspace = true
-homepage = "https://github.com/dakom/awsm-audio"
+homepage = "https://github.com/awsm-fun/awsm-audio"
 publish = false
 
 # Not a crates.io library (`publish = false`), but cargo-dist *does* ship its

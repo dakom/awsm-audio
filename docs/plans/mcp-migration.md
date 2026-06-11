@@ -289,9 +289,9 @@ Prebuilt binaries build from the workspace, so this is a non-issue.
 2. Commit the generated `.github/workflows/release.yml`; a `v*` tag → build all
    targets → publish binaries + checksums + installers.
 3. README install lines:
-   - `curl --proto '=https' --tlsv1.2 -LsSf https://github.com/dakom/awsm-audio/releases/latest/download/awsm-audio-mcp-installer.sh | sh`
-   - `powershell -ExecutionPolicy Bypass -c "irm https://github.com/dakom/awsm-audio/releases/latest/download/awsm-audio-mcp-installer.ps1 | iex"`
-   - footnote: `cargo install --git https://github.com/dakom/awsm-audio awsm-audio-mcp`
+   - `curl --proto '=https' --tlsv1.2 -LsSf https://github.com/awsm-fun/awsm-audio/releases/latest/download/awsm-audio-mcp-installer.sh | sh`
+   - `powershell -ExecutionPolicy Bypass -c "irm https://github.com/awsm-fun/awsm-audio/releases/latest/download/awsm-audio-mcp-installer.ps1 | iex"`
+   - footnote: `cargo install --git https://github.com/awsm-fun/awsm-audio awsm-audio-mcp`
 4. `dist` packages only the `awsm-audio-mcp` bin; frontends (Cloudflare Pages) and
    library crates (crates.io via `taskfiles/crates/publish.yml`) are untouched.
 

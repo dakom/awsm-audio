@@ -116,11 +116,11 @@ fn tabs() -> Vec<Tab> {
                     vec![
                         "Prebuilt binaries — no toolchain needed.",
                         "• macOS / Linux:",
-                        "$ curl --proto '=https' --tlsv1.2 -LsSf https://github.com/dakom/awsm-audio/releases/latest/download/awsm-audio-mcp-installer.sh | sh",
+                        "$ curl --proto '=https' --tlsv1.2 -LsSf https://github.com/awsm-fun/awsm-audio/releases/latest/download/awsm-audio-mcp-installer.sh | sh",
                         "• Windows (PowerShell):",
-                        "$ powershell -ExecutionPolicy Bypass -c \"irm https://github.com/dakom/awsm-audio/releases/latest/download/awsm-audio-mcp-installer.ps1 | iex\"",
+                        "$ powershell -ExecutionPolicy Bypass -c \"irm https://github.com/awsm-fun/awsm-audio/releases/latest/download/awsm-audio-mcp-installer.ps1 | iex\"",
                         "• From source (needs Rust):",
-                        "$ cargo install --git https://github.com/dakom/awsm-audio awsm-audio-mcp",
+                        "$ cargo install --git https://github.com/awsm-fun/awsm-audio awsm-audio-mcp",
                     ],
                 ),
                 (
@@ -534,7 +534,7 @@ fn footer() -> Dom {
             .text("Created by David Komer")
         }))
         .child(html!("a", {
-            .attr("href", "https://github.com/dakom/awsm-audio")
+            .attr("href", "https://github.com/awsm-fun/awsm-audio")
             .attr("target", "_blank")
             .attr("rel", "noopener noreferrer")
             .attr("title", "Source on GitHub")
@@ -544,7 +544,7 @@ fn footer() -> Dom {
             .style("color", "var(--accent-bright)")
             .style("text-decoration", "none")
             .style("font-weight", "600")
-            .child(html!("span", { .text("github.com/dakom/awsm-audio") }))
+            .child(html!("span", { .text("github.com/awsm-fun/awsm-audio") }))
             .child(html!("span", { .style("font-size", "11px").style("opacity", "0.85").text("↗") }))
         }))
     })
