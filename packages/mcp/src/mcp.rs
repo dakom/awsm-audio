@@ -1706,20 +1706,20 @@ impl ServerHandler for EditorMcp {
              phaser, bitcrusher, ring modulator, custom grain/spectral effects — use \
              an audio_worklet: read the awsm-audio://docs/worklet-abi resource, author \
              + build a worklet crate, and attach it with the attach_wasm tool.\n\n\
-             For a song / full-track / genre request, work arrangement-first instead \
-             of one monolithic root sequencer: build and bounce each part (drums, \
-             bass, chords/skank, FX) as its own short loop Sound, then create_arrangement \
-             and place clips into sections (intro / drop / switch / outro) — \
-             add_arrangement_track + add_clip, with beats_to_secs / duplicate_clips for \
-             the timing. Check wav_stats / waveform after every major bounce (they catch \
-             a too-short render, a hot/clipping bounce, overlapping clips). \
-             add_chain builds a linear node patch in one call; dispatch_refs wires \
-             a non-linear graph in one call with $ref ids; get_render_plan explains \
-             how long a bounce will run; add_clips places a loop across many bars; \
-             arrangement_track_stats shows which stem is hot. See the \
-             awsm-audio://docs/instruments resource for the instrument/voice mental \
-             model (anatomy, a worked kick, velocity, render duration) and \
-             awsm-audio://docs/genres for per-genre checklists."
+             For a song / full-track request, work arrangement-first instead \
+             of one monolithic root sequencer: build and bounce each part as its own \
+             short loop Sound, then create_arrangement and place clips into sections — \
+             add_arrangement_track + add_clip/add_clips (start_bars/start_beats), with \
+             duplicate_clips for tiling. Check wav_stats / waveform after every major \
+             bounce (they catch a too-short render, a hot/clipping bounce, overlapping \
+             clips). add_chain builds a linear node patch in one call; dispatch_refs \
+             wires a non-linear graph in one call with $ref ids; get_render_plan \
+             explains how long a bounce will run; arrangement_track_stats shows which \
+             stem is hot. The musical decisions (genre, instrumentation, arrangement, \
+             feel) are yours — bring your own knowledge; the docs only cover the \
+             tool's mechanics: awsm-audio://docs/track-workflow (how to assemble a \
+             track in this editor) and awsm-audio://docs/instruments (voice anatomy, \
+             a worked kick, velocity, render duration)."
                 .to_string(),
         );
         info
@@ -1788,10 +1788,11 @@ impl ServerHandler for EditorMcp {
                  it, and attach it with attach_wasm — with a minimal Gain example.",
             ),
             res(
-                "awsm-audio://docs/genres",
-                "Genre style checklists",
-                "Arrangement-first workflow + short per-genre style checklists \
-                 (drums, bass, harmony, FX, sectioning) for common electronic genres.",
+                "awsm-audio://docs/track-workflow",
+                "Track-building workflow",
+                "The awsm-audio-specific workflow for assembling a full track \
+                 (build parts → bounce → arrange → mix → verify). Genre-agnostic by \
+                 design — it leaves all musical/taste decisions to your own knowledge.",
             ),
             res(
                 "awsm-audio://docs/instruments",
@@ -1812,7 +1813,7 @@ impl ServerHandler for EditorMcp {
         let body = match req.uri.as_str() {
             "awsm-audio://docs/vocabulary" => VOCABULARY_DOC,
             "awsm-audio://docs/worklet-abi" => WORKLET_ABI_DOC,
-            "awsm-audio://docs/genres" => GENRES_DOC,
+            "awsm-audio://docs/track-workflow" => TRACK_WORKFLOW_DOC,
             "awsm-audio://docs/instruments" => INSTRUMENTS_DOC,
             other => {
                 return Err(McpError::resource_not_found(
@@ -2130,57 +2131,47 @@ ways to capture a real-length render:
 Either way, follow with `wav_stats` / `waveform` to confirm the length and level.
 "#;
 
-/// Arrangement-first workflow + per-genre style checklists, served as the
-/// `awsm-audio://docs/genres` resource. Nudges song requests toward bounced
-/// loops + a sectioned arrangement instead of one monolithic root sequencer.
-const GENRES_DOC: &str = r#"# Building a track: arrangement-first + genre checklists
+/// The awsm-audio-specific track-building *workflow* (not music advice), served as
+/// `awsm-audio://docs/track-workflow`. Nudges song requests toward bounced loops +
+/// a sectioned arrangement instead of one monolithic root sequencer, and leaves
+/// all genre/taste decisions to the agent's own knowledge.
+const TRACK_WORKFLOW_DOC: &str = r#"# Building a full track: the awsm-audio workflow
 
-## The workflow (any genre)
+This is the **tool-specific workflow** — how to assemble a track out of awsm-audio's
+primitives. It is deliberately genre-agnostic: *you* know the genre, its feel, its
+instrumentation and arrangement conventions far better than any checklist here, so
+bring that knowledge and apply it to these primitives. The only thing this resource
+adds is how the pieces fit together in this editor.
 
-Don't build one giant root sequencer. Build *parts*, bounce them, arrange them:
+## Build parts → bounce → arrange (don't build one giant root sequencer)
 
-1. For each part — drums, bass, chords/skank, FX/calls — author a short loop Sound
-   (graph or sequencer-driven instrument), then `bounce` it. Check `wav_stats` /
-   `waveform` after each bounce (catch a too-short render, a hot/clipping bounce).
+1. For each part you decide the track needs — author a short **loop Sound** (a graph,
+   or a sequencer-driven instrument; see the `awsm-audio://docs/instruments`
+   resource for voice anatomy), then `bounce` it. Check `wav_stats` / `waveform`
+   after each bounce to catch a too-short render or a hot/clipping bounce.
 2. `create_arrangement`; `add_arrangement_track` one per part; name them
    (`set_track_name`).
-3. Place clips into sections — intro / drop / switch / outro — with `add_clip`
-   (use `beats_to_secs` for the `start`; `get_arrangement` has the BPM).
-4. Tile loops across a section with `duplicate_clips` (interval in bars/beats).
-5. Balance with `set_track_gain` / `set_clip_gain`. Set loop/export markers
-   (`set_arrangement_markers`) to render a region.
-6. Before exporting: `arrangement_bounce_report` to spot stale/missing clip
+3. Place clips into sections with `add_clip` / `add_clips` — give positions in
+   `start_bars` / `start_beats` directly (they use the arrangement BPM), or an
+   `add_clips` `sections` string like `"3-12, 15-20"`. `duplicate_clips` tiles a
+   track's clips at a bar/beat interval.
+4. Balance with `set_track_gain` / `set_clip_gain`. Use `arrangement_track_stats`
+   to see which stem is hot (per-track solo render) instead of rescaling blindly.
+   Set loop/export markers (`set_arrangement_markers`, bar forms accepted) to
+   render just a region.
+5. Before exporting: `arrangement_bounce_report` to spot stale/missing clip
    bounces, `bounce_all_dirty` to fix them, then `render_wav` / `wav_stats` on the
    arrangement (watch for clipping from overlapping clips).
 
-## Per-genre checklists
+## What's yours vs. what's the tool's
 
-### Ragga jungle (~160–175 BPM)
-- Chopped break (e.g. Amen): slice + re-sequence, don't loop it flat.
-- Deep sub bass (sine/triangle), often a reggae-style bassline.
-- Offbeat reggae "skank" stabs (organ/stab on the off-beats).
-- Dub FX: delay + reverb throws on stabs and one-shots.
-- Siren / call-and-response vocal-style accents.
-- Sectioned arrangement: intro (filtered/sparse) → drop (full break+sub) →
-  switch (re-chop / bass change) → outro.
-
-### Boom-bap / lo-fi hip-hop (~85–95 BPM)
-- Punchy but loose drums: a fat kick + a cracky snare on 2 and 4, swung closed
-  hats. Slight timing/velocity variation (not a rigid grid) gives the head-nod.
-- Sampled-feel chords: a jazzy electric-piano / vinyl-ish stab (filter off the
-  highs, a touch of noise for texture), often a 2–4 bar loop.
-- Walking or simple sub bass following the chord roots.
-- One-shot accents: vinyl crackle bed (noise → filter, low gain), the odd vocal
-  chop / horn stab.
-- Sectioned arrangement: intro (drums + crackle) → main (full) → break (drop drums,
-  keep keys) → out. Keep it a touch dirty — gentle saturation, not pristine.
-
-(Other genres follow the same shape — swap the parts: e.g. house = four-on-the-floor
-kick, offbeat hats, bass, chord stabs, vocal/FX; techno = driving kick, rumble bass,
-percussion layers, atmospheric FX. Build each as a loop, bounce, arrange.)
-
-See the awsm-audio://docs/instruments resource for how to build each drum/voice
-(anatomy, a worked kick, velocity scaling) and how long bounces run.
+- **Yours (your knowledge):** genre, tempo, swing/feel, which instruments, how the
+  parts interact, harmony, the arrangement's emotional shape, sound-design choices.
+  The primitives are expressive — don't settle for a generic version of a style.
+- **The tool's (this doc + `instruments`):** the build order above, voice anatomy
+  and envelope/velocity mechanics, how long a bounce runs (`get_render_plan`), and
+  the verification loop. Lean on these so the mechanics never trip you up; lean on
+  your own taste for everything that makes the track good.
 "#;
 
 /// The instrument-anatomy + rendering-model guide served as
