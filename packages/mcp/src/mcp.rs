@@ -2125,7 +2125,7 @@ edition = "2021"
 crate-type = ["cdylib"]
 
 [dependencies]
-awsm-audio-worklet = "0.1"
+awsm-audio-worklet = "1"
 ```
 
 (The `worklet_cargo_toml` tool returns this snippet ready to paste.)
@@ -2469,7 +2469,7 @@ edition = "2021"
 crate-type = ["cdylib"]
 
 [dependencies]
-awsm-audio-worklet = "0.1"
+awsm-audio-worklet = "1"
 
 # Build: cargo build -p my-worklet --target wasm32-unknown-unknown --release
 # Attach the resulting .wasm with the attach_wasm tool.
