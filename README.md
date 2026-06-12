@@ -4,6 +4,8 @@ A node-graph WebAudio editor + player, in Rust → WebAssembly. Build, parameter
 and play WebAudio graphs in a Max/MSP–style canvas — including your own DSP
 compiled to WASM.
 
+# Live editor: [https://audio.awsm.fun](https://audio.awsm.fun)
+
 ## Quick start
 
 ```sh
