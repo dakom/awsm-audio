@@ -3,7 +3,9 @@
 //! as well as encode. Values that don't derive `PartialEq` are compared by their
 //! serialized JSON form (serialize → deserialize → serialize, assert equal).
 
-use awsm_audio_schema::{Clip, GainPoint, NodeId, NodeKind, NoteEvent, SampleId};
+use awsm_audio_schema::{
+    Clip, GainPoint, NodeId, NodeKind, NoteEvent, Sample, SampleId, SampleLibrary,
+};
 use serde_json::Value;
 
 use crate::{
@@ -18,29 +20,33 @@ use crate::{
 /// (library/layout) — otherwise the save errors out and leaves an empty folder.
 #[test]
 fn editor_project_serializes_to_toml() {
-    for (name, library) in awsm_audio_schema::examples::all() {
-        let project = EditorProject {
-            library,
-            layout: vec![NodeLayout {
-                id: NodeId::new(),
-                x: 1.0,
-                y: 2.0,
-            }],
-            pan_x: 3.0,
-            pan_y: 4.0,
-            zoom: 1.5,
-        };
-        // Mirrors `EditorController::save_to_dir`.
-        let toml = toml::to_string_pretty(&project)
-            .unwrap_or_else(|e| panic!("save serializes project.toml for '{name}': {e}"));
-        let back: EditorProject = toml::from_str(&toml)
-            .unwrap_or_else(|e| panic!("reload parses project.toml for '{name}': {e}"));
-        assert_eq!(
-            serde_json::to_value(&project).unwrap(),
-            serde_json::to_value(&back).unwrap(),
-            "project.toml round-trip mismatch for '{name}'"
-        );
-    }
+    let sample = Sample::new("fixture");
+    let library = SampleLibrary {
+        root: Some(sample.id),
+        samples: vec![sample],
+        ..Default::default()
+    };
+    let project = EditorProject {
+        library,
+        layout: vec![NodeLayout {
+            id: NodeId::new(),
+            x: 1.0,
+            y: 2.0,
+        }],
+        pan_x: 3.0,
+        pan_y: 4.0,
+        zoom: 1.5,
+    };
+    // Mirrors `EditorController::save_to_dir`.
+    let toml = toml::to_string_pretty(&project)
+        .unwrap_or_else(|e| panic!("save serializes project.toml: {e}"));
+    let back: EditorProject =
+        toml::from_str(&toml).unwrap_or_else(|e| panic!("reload parses project.toml: {e}"));
+    assert_eq!(
+        serde_json::to_value(&project).unwrap(),
+        serde_json::to_value(&back).unwrap(),
+        "project.toml round-trip mismatch"
+    );
 }
 
 /// JSON round-trip: encode → decode → re-encode and assert the two JSON values

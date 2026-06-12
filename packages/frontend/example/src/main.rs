@@ -1,6 +1,6 @@
 //! A runnable demo of [`awsm_audio_player::document`] — the same engine the
-//! editor drives. It loads built-in example projects (plus a couple of fabricated
-//! ones), [`Player::register`]s their assets, and plays any of them with
+//! editor drives. It builds a couple of small local fixtures, [`Player::register`]s
+//! their assets, and plays any of them with
 //! [`Player::play_document`]: a plain Sound, a sequencer Sequence, or an Arrangement.
 //!
 //! Clicking a card opens a **per-sound player** whose live controls are built
@@ -20,13 +20,11 @@ use wasm_bindgen::closure::Closure;
 use wasm_bindgen::JsCast;
 use wasm_bindgen_futures::spawn_local;
 
-use awsm_audio_player::document::{
-    audio_clip_parts, classify, PlayKind, PlayOptions, Playback, SoundShape,
-};
+use awsm_audio_player::document::{classify, PlayKind, PlayOptions, Playback, SoundShape};
 use awsm_audio_player::Player;
 use awsm_audio_schema::{
-    examples, ArrTrack, AssetId, AudioParam, Bounce, Clip, Connection, GainNode, Node, NodeId,
-    NodeKind, OscillatorNode, Sample, SampleId, SampleLibrary,
+    ArrTrack, AssetId, AudioParam, Bounce, Clip, Connection, GainNode, Node, NodeId, NodeKind,
+    OscillatorNode, Sample, SampleId, SampleLibrary,
 };
 
 /// One playable project in the picker.
@@ -107,24 +105,7 @@ struct App {
 
 impl App {
     fn new() -> Rc<Self> {
-        let mut projects: Vec<Project> = examples::all()
-            .into_iter()
-            .filter_map(|(name, lib)| {
-                let target = lib.root.or_else(|| lib.samples.first().map(|s| s.id))?;
-                let kind = classify(&lib, target);
-                // Skip a project that would play nothing — the built-in
-                // "arrangement" example ships as an empty timeline (no clips).
-                if kind == PlayKind::Arrangement && audio_clip_parts(&lib, target, 0.0).is_empty() {
-                    return None;
-                }
-                Some(Project {
-                    name: name.to_string(),
-                    lib,
-                    target,
-                    kind,
-                })
-            })
-            .collect();
+        let mut projects: Vec<Project> = Vec::new();
 
         // A single-oscillator Sound (frequency control demo).
         let (lib, target) = live_tone();

@@ -114,7 +114,7 @@ pub fn editor_query_toml(query_toml: &str) -> String {
     }
 }
 
-/// Load a built-in example by name (the keys from `examples::all()`).
+/// Load an editor-served example by name.
 #[wasm_bindgen]
 pub fn editor_load_example(name: &str) -> String {
     controller::controller().load_example(name);

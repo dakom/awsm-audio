@@ -1,22 +1,19 @@
 //! The example browser modal. Opened from the transport's "Load example…"
-//! button, it presents the built-in examples as cards tagged with the node
-//! kinds each uses — with the sequenced songs and the WASM AudioWorklet examples
-//! each grouped into their own section so they're easy to discover. Clicking a
-//! card loads it.
+//! button, it presents URL-loaded examples as cards. Clicking a card fetches
+//! the corresponding TOML/project directory from the editor-served `examples/`
+//! tree; no example project data is compiled into Rust crates.
 
-use awsm_audio_schema::{examples, NodeKind, SampleLibrary};
 use dominator::{clone, events, html, Dom};
 use futures_signals::signal::SignalExt;
 
 use crate::controller::controller;
-use crate::ports::kind_label;
 
 /// The "Audio Worklet" tag label (also the marker for the WASM section).
 const WORKLET_TAG: &str = "Audio Worklet";
 
 struct Card {
-    key: String,
-    title: String,
+    key: &'static str,
+    title: &'static str,
     tags: Vec<&'static str>,
     worklet: bool,
     song: bool,
@@ -143,7 +140,7 @@ fn section(title: &str, subtitle: &str, cards: Vec<Card>) -> Dom {
 }
 
 fn card(c: Card) -> Dom {
-    let key = c.key.clone();
+    let key = c.key;
     html!("div", {
         .class("ex-card")
         .style("padding", "10px 12px")
@@ -167,7 +164,7 @@ fn card(c: Card) -> Dom {
             .children(c.tags.into_iter().map(tag_chip))
         }))
         .event(clone!(key => move |_: events::Click| {
-            controller().load_example(&key);
+            controller().load_example(key);
         }))
     })
 }
@@ -186,69 +183,51 @@ fn tag_chip(label: &'static str) -> Dom {
     })
 }
 
-/// Build the card list from the built-in examples, deriving tags from the node
-/// kinds each graph uses.
 fn cards() -> Vec<Card> {
-    examples::all()
-        .into_iter()
-        .map(|(key, lib)| {
-            let tags = node_tags(&lib);
-            let title = display_name(&lib).unwrap_or_else(|| key.to_string());
-            let worklet = tags.contains(&WORKLET_TAG);
-            // A "song" = anything driven by a sequencer node, or any current
-            // DAW-style arrangement. Detect by data, not label, so renamed
-            // examples cannot break the sectioning.
-            let song = has_sequencer(&lib) || has_arrangement(&lib);
-            Card {
-                key: key.to_string(),
-                title,
-                tags,
-                worklet,
-                song,
-            }
-        })
-        .collect()
+    vec![
+        card_spec(
+            "song",
+            "Sequenced Song",
+            &["Arrangement", "Sequencer"],
+            true,
+        ),
+        card_spec(
+            "arrangement",
+            "Arrangement",
+            &["Arrangement", "Audio Clip"],
+            true,
+        ),
+        card_spec("bell", "Bell", &["Oscillator", "Gain"], false),
+        card_spec("rain", "Rain", &["Noise", "Biquad Filter"], false),
+        card_spec("fire", "Fire", &["Noise", "Biquad Filter"], false),
+        card_spec("laser", "Laser", &["Oscillator", "Gain"], false),
+        card_spec("rocket", "Rocket", &["Noise", "Gain"], false),
+        card_spec("kick", "Kick", &["Oscillator", "Gain"], false),
+        card_spec("hihat", "Hi-hat", &["Noise", "Gain"], false),
+        card_spec("siren", "Siren", &["Oscillator", "Stereo Panner"], false),
+        card_spec("wobble", "Wobble", &["Oscillator", "Biquad Filter"], false),
+        card_spec("wind", "Wind", &["Noise", "Biquad Filter"], false),
+        card_spec("spatial", "Spatial", &["Panner", "Spatial Output"], false),
+        card_spec("crush", "Crush", &["Audio Worklet"], false),
+        card_spec("drive", "Drive", &["Audio Worklet"], false),
+        card_spec("ringmod", "Ringmod", &["Audio Worklet"], false),
+        card_spec("nested", "Nested", &["Sample", "Biquad Filter"], false),
+        card_spec("chord", "Chord Stab", &["Sample", "Audio Worklet"], false),
+        card_spec(
+            "acidrack",
+            "Acid Rack",
+            &["Oscillator", "Audio Worklet"],
+            false,
+        ),
+    ]
 }
 
-fn display_name(lib: &SampleLibrary) -> Option<String> {
-    root_sample(lib).map(|s| s.name.clone())
-}
-
-/// Distinct node-kind labels used anywhere in the library (root + every
-/// sub-sample), in first-seen order. Scanning all samples means a worklet or
-/// other node nested behind a `SampleRef` still surfaces as a tag.
-fn node_tags(lib: &SampleLibrary) -> Vec<&'static str> {
-    let mut seen: Vec<&'static str> = Vec::new();
-    for sample in &lib.samples {
-        for node in &sample.graph.nodes {
-            let label = kind_label(&node.kind);
-            if !seen.contains(&label) {
-                seen.push(label);
-            }
-        }
+fn card_spec(key: &'static str, title: &'static str, tags: &[&'static str], song: bool) -> Card {
+    Card {
+        key,
+        title,
+        tags: tags.to_vec(),
+        worklet: tags.contains(&WORKLET_TAG),
+        song,
     }
-    seen
-}
-
-/// True if any sample in the library contains a sequencer node — the marker for
-/// the "Sequenced Songs" section.
-fn has_sequencer(lib: &SampleLibrary) -> bool {
-    lib.samples.iter().any(|s| {
-        s.graph
-            .nodes
-            .iter()
-            .any(|n| matches!(n.kind, NodeKind::NoteSequencer(_)))
-    })
-}
-
-fn has_arrangement(lib: &SampleLibrary) -> bool {
-    lib.samples
-        .iter()
-        .any(|s| s.kind == awsm_audio_schema::SampleKind::Arrangement)
-}
-
-fn root_sample(lib: &SampleLibrary) -> Option<&awsm_audio_schema::Sample> {
-    lib.root
-        .and_then(|r| lib.sample(r))
-        .or_else(|| lib.samples.first())
 }

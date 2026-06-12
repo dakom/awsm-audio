@@ -54,7 +54,7 @@ tasks:
       - task: example:clean
 
   bump:
-    desc: "Set [workspace.package].version to <version> and refresh Cargo.lock — files only, NO git/tag/publish. Idempotent: re-running at the same version makes no diff, so it's safe to call repeatedly (and from `task publish`). Usage: task bump -- <version>"
+    desc: "Set [workspace.package].version to <version>, sync the worklet-ABI doc's dep major in mcp.rs, and refresh Cargo.lock — files only, NO git/tag/publish. Idempotent: re-running at the same version makes no diff, so it's safe to call repeatedly (and from `task publish`). Usage: task bump -- <version>"
     vars:
       VERSION: "{{.CLI_ARGS}}"
     preconditions:
@@ -69,6 +69,23 @@ tasks:
       #    `^0.1.0` (which only happens to cover patch bumps within 0.1.x).
       - sed -i.bak -E '/^awsm-audio-[a-z-]+ = \{ path =/ s/version = "[^"]*"/version = "{{.VERSION}}"/' Cargo.toml
       - rm -f Cargo.toml.bak
+      # 3. The worklet-ABI doc (mcp.rs WORKLET_ABI_DOC) embeds a copy-paste
+      #    `awsm-audio-worklet = "<major>"` snippet for agents. Unlike the tool
+      #    output (derived from CARGO_PKG_VERSION at runtime), this one is a const
+      #    string literal, so a major bump would leave it stale. Sync just the major.
+      #    Anchored to a bare-integer literal so the sibling `"{req}"` template — the
+      #    derived snippet — is never touched.
+      - |
+        MAJOR=$(printf '%s' "{{.VERSION}}" | cut -d. -f1)
+        sed -i.bak -E "s/^awsm-audio-worklet = \"[0-9]+\"\$/awsm-audio-worklet = \"$MAJOR\"/" packages/mcp/src/mcp.rs
+        rm -f packages/mcp/src/mcp.rs.bak
+        # Guard: fail loudly if the sed didn't land (doc line reworded/indented/renamed).
+        # Without this the major could silently drift out of lockstep with the bump.
+        if ! grep -qxF "awsm-audio-worklet = \"$MAJOR\"" packages/mcp/src/mcp.rs; then
+          echo "ERROR: could not sync the worklet-ABI doc dep major to \"$MAJOR\" in packages/mcp/src/mcp.rs." >&2
+          echo "       The 'awsm-audio-worklet = \"<major>\"' literal in WORKLET_ABI_DOC may have moved or changed shape." >&2
+          exit 1
+        fi
       # Refresh Cargo.lock so the workspace members' recorded versions match (and
       # sanity-build the tree). A no-op when already at this version.
       - cargo check --workspace --quiet
@@ -119,12 +136,9 @@ tasks:
       - cargo clippy --workspace -- -D warnings
 
   worklets:
-    desc: "Build the example WASM worklets and embed them into the schema assets."
+    desc: "Build the example WASM worklets."
     vars:
       OUT: target/wasm32-unknown-unknown/release
     cmds:
       - cargo build --release --target wasm32-unknown-unknown -p awsm-audio-worklet-bitcrusher -p awsm-audio-worklet-drive -p awsm-audio-worklet-ringmod
-      - cp {{.OUT}}/awsm_audio_worklet_bitcrusher.wasm packages/crates/schema/assets/bitcrusher.wasm
-      - cp {{.OUT}}/awsm_audio_worklet_drive.wasm packages/crates/schema/assets/drive.wasm
-      - cp {{.OUT}}/awsm_audio_worklet_ringmod.wasm packages/crates/schema/assets/ringmod.wasm
-      - 'echo "Worklets embedded. Regenerate examples: WRITE_EXAMPLES=1 cargo test -p awsm-audio-schema write_example_files"'
+      - 'echo "Worklets built in {{.OUT}}. Copy them into an editor-served example directory if a demo needs them."'

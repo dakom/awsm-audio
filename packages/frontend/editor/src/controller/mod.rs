@@ -4242,28 +4242,52 @@ impl EditorController {
         self.help_open.set(false);
     }
 
-    /// Load a built-in example by name and close the browser.
+    /// Load an editor-served example by name and close the browser.
     pub fn load_example(&self, name: &str) {
-        if let Some(toml) = awsm_audio_schema::examples::project_toml(name) {
-            match toml::from_str::<crate::controller::snapshot::EditorProject>(toml) {
-                Ok(project) => {
-                    self.open_project_with_asset_base(
-                        project,
-                        awsm_audio_schema::examples::project_asset_base(name)
-                            .map(|s| s.to_string()),
-                    );
+        if let Some(base) = example_project_base(name) {
+            let ctrl = self.clone();
+            let base = base.to_string();
+            self.examples_open.set(false);
+            wasm_bindgen_futures::spawn_local(async move {
+                let url = format!("{}/project.toml", base.trim_end_matches('/'));
+                match fetch_text(&url).await {
+                    Ok(toml) => {
+                        match toml::from_str::<crate::controller::snapshot::EditorProject>(&toml) {
+                            Ok(project) => ctrl.open_project_with_asset_base(project, Some(base)),
+                            Err(e) => ctrl
+                                .status
+                                .set(Some(format!("Example project parse failed: {e}"))),
+                        }
+                    }
+                    Err(e) => ctrl
+                        .status
+                        .set(Some(format!("Example project fetch failed: {e:?}"))),
                 }
-                Err(e) => self
-                    .status
-                    .set(Some(format!("Example project parse failed: {e}"))),
-            }
-        } else if let Some((_, lib)) = awsm_audio_schema::examples::all()
-            .into_iter()
-            .find(|(n, _)| *n == name)
-        {
-            self.load_library(lib);
+            });
+        } else if let Some(url) = example_library_url(name) {
+            let ctrl = self.clone();
+            let asset_base = example_asset_base();
+            self.examples_open.set(false);
+            wasm_bindgen_futures::spawn_local(async move {
+                match fetch_text(url).await {
+                    Ok(toml) => match toml::from_str::<awsm_audio_schema::SampleLibrary>(&toml) {
+                        Ok(lib) => {
+                            *ctrl.asset_base_path.borrow_mut() = Some(asset_base.to_string());
+                            ctrl.load_library_inner(lib, None);
+                        }
+                        Err(e) => ctrl
+                            .status
+                            .set(Some(format!("Example library parse failed: {e}"))),
+                    },
+                    Err(e) => ctrl
+                        .status
+                        .set(Some(format!("Example library fetch failed: {e:?}"))),
+                }
+            });
+        } else {
+            self.examples_open.set(false);
+            self.status.set(Some(format!("Unknown example: {name}")));
         }
-        self.examples_open.set(false);
     }
 
     /// Replace the canvas with the root sample of `lib`, auto-laying-out its
@@ -5716,6 +5740,58 @@ fn resolve_asset_url(base: Option<&str>, path: &str) -> String {
         ),
         None => path.to_string(),
     }
+}
+
+fn example_project_base(key: &str) -> Option<&'static str> {
+    match key {
+        "arrangement" => Some("examples/arrangement"),
+        "song" => Some("examples/sequenced-song"),
+        _ => None,
+    }
+}
+
+fn example_library_url(key: &str) -> Option<&'static str> {
+    match key {
+        "acidrack" => Some("examples/acidrack.toml"),
+        "bell" => Some("examples/bell.toml"),
+        "chord" => Some("examples/chord.toml"),
+        "crush" => Some("examples/crush.toml"),
+        "drive" => Some("examples/drive.toml"),
+        "fire" => Some("examples/fire.toml"),
+        "hihat" => Some("examples/hihat.toml"),
+        "kick" => Some("examples/kick.toml"),
+        "laser" => Some("examples/laser.toml"),
+        "nested" => Some("examples/nested.toml"),
+        "rain" => Some("examples/rain.toml"),
+        "ringmod" => Some("examples/ringmod.toml"),
+        "rocket" => Some("examples/rocket.toml"),
+        "siren" => Some("examples/siren.toml"),
+        "spatial" => Some("examples/spatial.toml"),
+        "wind" => Some("examples/wind.toml"),
+        "wobble" => Some("examples/wobble.toml"),
+        _ => None,
+    }
+}
+
+fn example_asset_base() -> &'static str {
+    "examples"
+}
+
+async fn fetch_text(url: &str) -> Result<String, JsValue> {
+    let win = web_sys::window().ok_or_else(|| JsValue::from_str("no window"))?;
+    let resp: web_sys::Response = wasm_bindgen_futures::JsFuture::from(win.fetch_with_str(url))
+        .await?
+        .dyn_into()?;
+    if !resp.ok() {
+        return Err(JsValue::from_str(&format!(
+            "HTTP {} {}",
+            resp.status(),
+            resp.status_text()
+        )));
+    }
+    let text = wasm_bindgen_futures::JsFuture::from(resp.text()?).await?;
+    text.as_string()
+        .ok_or_else(|| JsValue::from_str("response text was not a string"))
 }
 
 async fn fetch_bytes(url: &str) -> Result<js_sys::ArrayBuffer, JsValue> {

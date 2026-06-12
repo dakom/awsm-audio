@@ -15,8 +15,6 @@ uuid = { workspace = true }
 # Optional: derive JSON Schema for the schema types so the native MCP server can
 # expose strongly-typed tool params. Off by default (wasm never pulls it).
 schemars = { workspace = true, optional = true }
-# Encodes the bundled example WASM module inline in the `crush` example.
-base64 = { workspace = true }
 # Standard MIDI File parsing for the Note Sequencer (and Control Sequencer CC import).
 midly = { workspace = true }
 

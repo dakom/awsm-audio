@@ -4185,7 +4185,7 @@ edition = "2021"
 crate-type = ["cdylib"]
 
 [dependencies]
-awsm-audio-worklet = "1"
+awsm-audio-worklet = "2"
 ```
 
 (The `worklet_cargo_toml` tool returns this snippet ready to paste.)

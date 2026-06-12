@@ -50,7 +50,6 @@ pub mod asset;
 pub mod connection;
 pub mod enums;
 pub mod error;
-pub mod examples;
 pub mod flatten;
 pub mod graph;
 pub mod ids;
