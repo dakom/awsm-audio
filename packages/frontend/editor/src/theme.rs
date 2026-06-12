@@ -161,6 +161,14 @@ pub fn init() {
     // `@keyframes` aren't a selector rule, so inject them as a raw <style>. Drives
     // the "🤖 agent working…" MCP pulse (see `ui::mcp_modal`).
     inject_keyframes("@keyframes mcp-pulse{0%,100%{opacity:1}50%{opacity:0.4}}");
+    // The MCP auto-follow "spotlight": a glow that flares on the node the agent
+    // just touched, then fades — so the eye catches where a change landed (see
+    // `ui::node` + `mcp_activity`).
+    inject_keyframes(
+        "@keyframes mcp-spotlight{\
+         0%{box-shadow:0 0 0 3px var(--accent-bright),0 0 22px 4px var(--accent-line),0 6px 18px oklch(0 0 0 / 0.4)}\
+         100%{box-shadow:0 0 0 0 transparent,0 0 0 0 transparent,0 6px 18px oklch(0 0 0 / 0.4)}}",
+    );
 }
 
 /// Append a raw CSS rule (e.g. an `@keyframes` block) to the document head.

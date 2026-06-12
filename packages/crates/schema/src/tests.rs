@@ -859,3 +859,24 @@ fn validate_rejects_incompatible_wire() {
         .iter()
         .any(|e| matches!(e, SchemaError::IncompatibleWire { .. })));
 }
+
+#[test]
+fn node_kind_from_tag_round_trips_every_tag() {
+    // Every bare tag must construct a kind whose serde tag is that same string —
+    // this is what guarantees "a kind-name string works wherever a NodeKind is
+    // accepted" (the MCP add_node / add_chain bare-string path) never drifts from
+    // the serde representation.
+    for tag in NodeKind::all_tags() {
+        let kind = NodeKind::from_tag(tag)
+            .unwrap_or_else(|| panic!("from_tag({tag}) returned None for a listed tag"));
+        let v = toml::Value::try_from(&kind).expect("serialize");
+        assert_eq!(
+            v.get("kind").and_then(|k| k.as_str()),
+            Some(*tag),
+            "from_tag({tag}) serialized with a different tag"
+        );
+    }
+    // Unknown tags (and `sample`, which needs a target id) are rejected.
+    assert!(NodeKind::from_tag("sample").is_none());
+    assert!(NodeKind::from_tag("wibble").is_none());
+}

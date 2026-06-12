@@ -161,6 +161,7 @@ fn query_result_round_trip() {
             is_active: true,
             bounce: Some("clean".into()),
             duration_secs: Some(2.5),
+            notes: "keeper".into(),
         }]),
         QueryResult::BounceStatus("clean".into()),
         QueryResult::Transport(TransportInfo {
@@ -176,6 +177,13 @@ fn query_result_round_trip() {
             channels: 2,
             sample_rate: 48_000,
             clipping: false,
+            crest_factor: 1.5,
+            dc_offset: 0.0,
+            leading_silence_secs: 0.0,
+            trailing_silence_secs: 0.1,
+            attack_secs: 0.01,
+            decay_secs: 0.5,
+            true_peak: 0.92,
         }),
         QueryResult::Waveform(WaveformEnvelope {
             sample_rate: 48_000,
@@ -243,11 +251,13 @@ fn request_round_trip() {
             sample: Some(SampleId::new()),
             sample_rate: Some(44_100.0),
             duration_secs: Some(8.0),
+            trim_silence: false,
         },
         Request::RenderWav {
             sample: None,
             sample_rate: None,
             duration_secs: None,
+            trim_silence: false,
         },
         Request::AttachWasm {
             node: NodeId::new(),
@@ -290,6 +300,7 @@ fn request_wire_shape() {
         sample: None,
         sample_rate: None,
         duration_secs: None,
+        trim_silence: false,
     })
     .unwrap();
     // `RenderWav` with all fields skipped serializes to an empty object.
@@ -386,4 +397,46 @@ fn waveform_of_ramp_is_monotonic() {
     for i in 1..w.max.len() {
         assert!(w.max[i] >= w.max[i - 1], "bucket {i} not monotonic");
     }
+}
+
+#[test]
+fn wav_stats_transient_readbacks() {
+    // 1s mono at 100 Hz: 0.1s silence, ramp up to peak at 0.3s, decay to
+    // silence by 0.8s, trailing silence after. Floor is -60 dBFS (0.001).
+    let sr = 100u32;
+    let mut pcm = vec![0.0f32; 100];
+    for (i, v) in pcm.iter_mut().enumerate().take(30).skip(10) {
+        *v = (i - 10) as f32 / 20.0; // 0 → 1.0 ramp, peak at i=30
+    }
+    for (i, v) in pcm.iter_mut().enumerate().take(80).skip(30) {
+        *v = 1.0 - (i - 30) as f32 / 50.0; // 1.0 → 0 ramp
+    }
+    let stats = WavStats::from_pcm(&[pcm], sr);
+    assert!(
+        (stats.leading_silence_secs - 0.11).abs() < 0.02,
+        "lead {}",
+        stats.leading_silence_secs
+    );
+    assert!(
+        stats.trailing_silence_secs > 0.18,
+        "trail {}",
+        stats.trailing_silence_secs
+    );
+    assert!(
+        (stats.attack_secs - 0.19).abs() < 0.03,
+        "attack {}",
+        stats.attack_secs
+    );
+    assert!(
+        stats.decay_secs > 0.4 && stats.decay_secs < 0.55,
+        "decay {}",
+        stats.decay_secs
+    );
+    assert!(stats.crest_factor > 1.0, "crest {}", stats.crest_factor);
+    assert!(stats.dc_offset > 0.0, "ramps are positive-only");
+
+    // Silent buffer: everything reads as silence, nothing panics.
+    let silent = WavStats::from_pcm(&[vec![0.0; 100]], sr);
+    assert_eq!(silent.leading_silence_secs, 1.0);
+    assert_eq!(silent.crest_factor, 0.0);
 }

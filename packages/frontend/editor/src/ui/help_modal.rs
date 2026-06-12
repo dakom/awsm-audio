@@ -167,6 +167,22 @@ fn tabs() -> Vec<Tab> {
                          schema — no guesswork.",
                     ],
                 ),
+                (
+                    "5 · Watch it work (Live work display)",
+                    vec![
+                        "While the agent drives, the editor shows what's happening: \
+                         the 🤖 chip names the current action (“Bouncing “Bass””, \
+                         “Connecting nodes”), the canvas follows the agent to \
+                         whatever sample it touches (opening the arranger for \
+                         arrangements) and flashes the node it just changed, and an \
+                         optional floating feed logs recent actions.",
+                        "All three are toggles under “Live work display” in the MCP \
+                         connect modal. The action label and follow are on by \
+                         default; the feed is off (it can crowd the canvas). \
+                         Settings persist per browser tab, so two open projects \
+                         never fight over them.",
+                    ],
+                ),
             ],
         ),
         (

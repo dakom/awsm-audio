@@ -11,7 +11,9 @@
 use dominator::{clone, events, html, with_node, Dom};
 use futures_signals::map_ref;
 use futures_signals::signal::{Mutable, SignalExt};
+use futures_signals::signal_vec::SignalVecExt;
 
+use crate::mcp_activity;
 use crate::remote::{self, RemoteStatus};
 use crate::widgets::{Btn, BtnSize, BtnVariant};
 
@@ -102,7 +104,117 @@ fn activity_chip(working: bool) -> Dom {
                 .attr("title", "Agent idle — safe to edit / export.")
         })
         .child(html!("span", { .text("🤖") }))
-        .child(html!("span", { .text(if working { "working…" } else { "idle" }) }))
+        // The label: "idle" when at rest; otherwise the live action (e.g.
+        // "Bouncing “Bass”") if the action-label surface is on, else "working…".
+        .child(html!("span", {
+            .style("max-width", "230px")
+            .style("overflow", "hidden")
+            .style("text-overflow", "ellipsis")
+            .text_signal(map_ref! {
+                let show = mcp_activity::show_label().signal(),
+                let action = mcp_activity::current().signal_cloned() => {
+                    if !working {
+                        "idle".to_string()
+                    } else if *show {
+                        action.clone().unwrap_or_else(|| "working…".to_string())
+                    } else {
+                        "working…".to_string()
+                    }
+                }
+            })
+        }))
+    })
+}
+
+/// A floating, rolling log of the agent's recent actions (newest on top). Mounted
+/// once in [`crate::ui`]; shown only when the feed toggle is on *and* the link is
+/// connected. Click-through (pointer-events: none) so it never blocks the canvas.
+pub fn feed_panel() -> Dom {
+    html!("div", {
+        .style("position", "fixed")
+        .style("left", "14px")
+        .style("bottom", "14px")
+        .style("z-index", "500")
+        .style("display", "flex")
+        .style("flex-direction", "column")
+        .style("gap", "3px")
+        .style("width", "300px")
+        .style("max-width", "calc(100vw - 28px)")
+        .style("padding", "10px 12px")
+        .style("border-radius", "10px")
+        .style("background", "oklch(0.21 0.02 250 / 0.84)")
+        .style("backdrop-filter", "blur(6px)")
+        .style_unchecked("-webkit-backdrop-filter", "blur(6px)")
+        .style("border", "1px solid var(--line)")
+        .style("box-shadow", "0 12px 34px oklch(0 0 0 / 0.45)")
+        .style("font-size", "12px")
+        .style("pointer-events", "none")
+        .visible_signal(map_ref! {
+            let on = mcp_activity::show_feed().signal(),
+            let status = remote::status().signal() =>
+            *on && *status == RemoteStatus::Connected
+        })
+        .child(html!("div", {
+            .style("display", "flex")
+            .style("align-items", "center")
+            .style("gap", "6px")
+            .style("margin-bottom", "3px")
+            .style("color", "var(--text-3)")
+            .style("font-weight", "600")
+            .style("font-size", "10.5px")
+            .style("text-transform", "uppercase")
+            .style("letter-spacing", "0.05em")
+            .child(html!("span", { .text("🤖") }))
+            .child(html!("span", { .text("Agent activity") }))
+        }))
+        .children_signal_vec(mcp_activity::feed_signal().map(feed_row))
+    })
+}
+
+/// One line in the [`feed_panel`].
+fn feed_row(text: String) -> Dom {
+    html!("div", {
+        .style("color", "var(--text-1)")
+        .style("white-space", "nowrap")
+        .style("overflow", "hidden")
+        .style("text-overflow", "ellipsis")
+        .text(&text)
+    })
+}
+
+/// One labelled checkbox row in the "Live work display" settings block. `set`
+/// persists the choice (see [`mcp_activity`]); the box seeds from `state`.
+fn toggle_row(title: &str, desc: &str, state: Mutable<bool>, set: fn(bool)) -> Dom {
+    html!("label", {
+        .style("display", "flex")
+        .style("align-items", "flex-start")
+        .style("gap", "9px")
+        .style("margin-top", "11px")
+        .style("cursor", "pointer")
+        .style("user-select", "none")
+        .child(html!("input" => web_sys::HtmlInputElement, {
+            .attr("type", "checkbox")
+            .style("margin-top", "2px")
+            .style("flex", "none")
+            .apply(clone!(state => move |b| if state.get() { b.attr("checked", "") } else { b }))
+            .with_node!(cb => {
+                .event(move |_: events::Change| set(cb.checked()))
+            })
+        }))
+        .child(html!("span", {
+            .child(html!("div", {
+                .style("font-size", "13px")
+                .style("font-weight", "550")
+                .style("color", "var(--text-1)")
+                .text(title)
+            }))
+            .child(html!("div", {
+                .style("font-size", "12px")
+                .style("line-height", "1.4")
+                .style("color", "var(--text-2)")
+                .text(desc)
+            }))
+        }))
     })
 }
 
@@ -330,6 +442,45 @@ fn view() -> Dom {
                         })
                     }))
                     .text("Use TLS (wss/https) — for a server behind HTTPS")
+                }))
+                // "Live work display" — how the editor visualizes the agent while
+                // it drives. These are global UI preferences (persisted), so they
+                // apply to every tab, not just this project.
+                .child(html!("div", {
+                    .style("margin-top", "18px")
+                    .style("padding-top", "14px")
+                    .style("border-top", "1px solid var(--line)")
+                    .child(html!("div", {
+                        .style("font-size", "12.5px")
+                        .style("font-weight", "650")
+                        .style("color", "var(--text-1)")
+                        .text("Live work display")
+                    }))
+                    .child(html!("p", {
+                        .style("margin", "3px 0 4px")
+                        .style("font-size", "12px")
+                        .style("line-height", "1.45")
+                        .style("color", "var(--text-3)")
+                        .text("How the editor shows what the agent is doing as it works.")
+                    }))
+                    .child(toggle_row(
+                        "Show the current action",
+                        "The 🤖 chip names what's happening now (e.g. \u{201c}Bouncing \u{201c}Bass\u{201d}\u{201d}) instead of just \u{201c}working…\u{201d}.",
+                        mcp_activity::show_label(),
+                        mcp_activity::set_show_label,
+                    ))
+                    .child(toggle_row(
+                        "Follow the agent",
+                        "Jump the canvas to whatever sample the agent touches (opening the arranger for arrangements) and flash the affected node.",
+                        mcp_activity::auto_follow(),
+                        mcp_activity::set_auto_follow,
+                    ))
+                    .child(toggle_row(
+                        "Show the activity feed",
+                        "A floating log of recent actions in the corner. Off by default — it can crowd the canvas.",
+                        mcp_activity::show_feed(),
+                        mcp_activity::set_show_feed,
+                    ))
                 }))
                 // Footer actions, reactive to the link status: when connected, an
                 // explicit Disconnect (so the button never silently toggles off);

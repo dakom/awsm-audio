@@ -50,6 +50,10 @@ pub struct Sample {
     /// arrangements play it as an audio clip; goes stale when the graph changes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bounce: Option<Bounce>,
+    /// Free-form working notes ("impact variant", "keeper", "needs shorter
+    /// tail") — annotation metadata, never interpreted by the player.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub notes: String,
 }
 
 impl Sample {
@@ -63,6 +67,7 @@ impl Sample {
             trigger: TriggerSpec::default(),
             arrangement: Arrangement::default(),
             bounce: None,
+            notes: String::new(),
         }
     }
 

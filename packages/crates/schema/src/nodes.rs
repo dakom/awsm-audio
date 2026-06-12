@@ -95,6 +95,72 @@ pub enum NodeKind {
 }
 
 impl NodeKind {
+    /// Construct a kind from its bare serde tag (e.g. `"oscillator"`,
+    /// `"biquad_filter"`) with WebAudio-default props — the catalog lookup behind
+    /// "a kind-name string is accepted wherever a `NodeKind` is". `None` for an
+    /// unknown tag, and for `"sample"` (a sample-ref needs a target sample id, so
+    /// it has no default).
+    pub fn from_tag(tag: &str) -> Option<Self> {
+        use NodeKind::*;
+        Some(match tag {
+            "oscillator" => Oscillator(Default::default()),
+            "audio_buffer_source" => AudioBufferSource(Default::default()),
+            "constant_source" => ConstantSource(Default::default()),
+            "noise" => Noise(Default::default()),
+            "media_element_source" => MediaElementSource(Default::default()),
+            "media_stream_source" => MediaStreamSource(Default::default()),
+            "gain" => Gain(Default::default()),
+            "biquad_filter" => BiquadFilter(Default::default()),
+            "iir_filter" => IirFilter(Default::default()),
+            "delay" => Delay(Default::default()),
+            "dynamics_compressor" => DynamicsCompressor(Default::default()),
+            "wave_shaper" => WaveShaper(Default::default()),
+            "convolver" => Convolver(Default::default()),
+            "panner" => Panner(Default::default()),
+            "stereo_panner" => StereoPanner(Default::default()),
+            "analyser" => Analyser(Default::default()),
+            "channel_splitter" => ChannelSplitter(Default::default()),
+            "channel_merger" => ChannelMerger(Default::default()),
+            "audio_worklet" => AudioWorklet(Default::default()),
+            "output" => Output(Default::default()),
+            "spatial_output" => SpatialOutput(Default::default()),
+            "note_sequencer" => NoteSequencer(Default::default()),
+            "control_sequencer" => ControlSequencer(Default::default()),
+            "bus" => Bus(Default::default()),
+            _ => return None,
+        })
+    }
+
+    /// Every tag accepted by [`from_tag`], for "did you mean" error messages.
+    pub fn all_tags() -> &'static [&'static str] {
+        &[
+            "oscillator",
+            "audio_buffer_source",
+            "constant_source",
+            "noise",
+            "media_element_source",
+            "media_stream_source",
+            "gain",
+            "biquad_filter",
+            "iir_filter",
+            "delay",
+            "dynamics_compressor",
+            "wave_shaper",
+            "convolver",
+            "panner",
+            "stereo_panner",
+            "analyser",
+            "channel_splitter",
+            "channel_merger",
+            "audio_worklet",
+            "output",
+            "spatial_output",
+            "note_sequencer",
+            "control_sequencer",
+            "bus",
+        ]
+    }
+
     /// Set a named `AudioParam`'s base value (used by macro-param bindings during
     /// flattening). Unknown names are ignored.
     pub fn set_param_value(&mut self, param: &str, value: f32) {

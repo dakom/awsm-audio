@@ -22,8 +22,8 @@ pub use command::{ArrangeOp, ControlOp, EditorCommand, PlacedClip, SongOp};
 pub use field::FieldValue;
 pub use node::{BoundaryPort, ConnId, ConnSink};
 pub use query::{
-    AssetInfo, EditorQuery, FieldInfo, NodeKindInfo, QueryResult, RenderPlanInfo, SampleInfo,
-    TrackStats, TransportInfo, WavStats, WaveformEnvelope,
+    AssetInfo, EditorQuery, FieldInfo, ModTargetInfo, NodeKindInfo, QueryResult, RenderPlanInfo,
+    SampleInfo, TrackStats, TransportInfo, WavStats, WaveformEnvelope,
 };
 pub use snapshot::{EditorProject, EditorSnapshot, NodeLayout};
 pub use transport::{

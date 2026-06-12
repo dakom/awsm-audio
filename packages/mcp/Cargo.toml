@@ -34,6 +34,9 @@ tracing = { workspace = true }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 serde = { workspace = true }
 serde_json = { workspace = true }
+# Encode the SampleLibrary patch `export_sample` writes (same format the
+# editor's Save uses, so patches open anywhere).
+toml = { workspace = true }
 futures = { workspace = true }
 
 # Decode the base64 `.wasm` an agent attaches via `attach_wasm`.

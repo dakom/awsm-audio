@@ -43,6 +43,10 @@ pub enum Request {
         sample_rate: Option<f32>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         duration_secs: Option<f64>,
+        /// Strip leading/trailing silence (below -60 dBFS) from the rendered PCM
+        /// before encoding — tight starts and controlled tails for one-shots.
+        #[serde(default, skip_serializing_if = "is_false")]
+        trim_silence: bool,
     },
     /// Attach a compiled WASM DSP module (base64-encoded `.wasm`) to an
     /// AudioWorklet node. Carries bytes (not an `EditorCommand`) for the same
@@ -65,6 +69,21 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         label: Option<String>,
     },
+    /// Merge a serialized [`SampleLibrary`](awsm_audio_schema::SampleLibrary)
+    /// (TOML — what `export_sample` writes) into the open project: its samples
+    /// and the assets they reference. Samples whose ids already exist are
+    /// rejected (re-import the same patch via `duplicate_sample` instead).
+    /// Carries the payload on the link like `AttachWasm` does — imports are
+    /// rare and the libraries small.
+    ImportSamples {
+        library_toml: String,
+    },
+}
+
+/// serde helper: skip serializing a `false` flag (keeps default wire shapes
+/// byte-identical to before the field existed).
+fn is_false(b: &bool) -> bool {
+    !*b
 }
 
 /// Server → browser WebSocket frame.
@@ -182,6 +201,9 @@ pub enum Response {
     Render(RenderHandle),
     /// An audio buffer was loaded into a node (see [`Request::LoadAudio`]).
     AudioLoaded(AudioInfo),
+    /// Samples were merged into the project (see [`Request::ImportSamples`]) —
+    /// one entry per imported sample.
+    Imported(Vec<crate::SampleInfo>),
     /// The request failed; the string is a human-readable reason.
     Err(String),
 }

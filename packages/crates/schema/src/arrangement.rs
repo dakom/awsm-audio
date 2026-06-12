@@ -31,6 +31,21 @@ pub struct Arrangement {
     /// The tracks, top to bottom.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub tracks: Vec<ArrTrack>,
+    /// Named regions of the timeline ("intro", "main", "outro") — annotation
+    /// metadata for navigation/authoring; playback never interprets them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sections: Vec<ArrSection>,
+}
+
+/// A named timeline region (annotation only — see [`Arrangement::sections`]).
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ArrSection {
+    pub name: String,
+    /// Region start, in seconds.
+    pub start: f64,
+    /// Region end, in seconds (exclusive; `end > start`).
+    pub end: f64,
 }
 
 impl Default for Arrangement {
@@ -41,6 +56,7 @@ impl Default for Arrangement {
             loop_start: None,
             loop_end: None,
             tracks: Vec::new(),
+            sections: Vec::new(),
         }
     }
 }

@@ -197,6 +197,22 @@ impl EditorLink {
         }
     }
 
+    /// How many editor tabs are currently connected (for `pairing_status`).
+    pub fn connection_count(&self) -> usize {
+        self.inner.connections.lock().unwrap().len()
+    }
+
+    /// How many agent sessions are currently alive (for `pairing_status`).
+    pub fn agent_count(&self) -> usize {
+        self.inner
+            .agents
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|a| a.upgrade().is_some())
+            .count()
+    }
+
     /// Publish an editor push event (tagged with its originating connection).
     pub fn publish_event(&self, conn_id: u64, ev: EditorEvent) {
         let _ = self.inner.events.send((conn_id, ev));

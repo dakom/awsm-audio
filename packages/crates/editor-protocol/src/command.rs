@@ -117,6 +117,9 @@ pub enum EditorCommand {
     CloneSample { id: SampleId },
     /// Rename a sample.
     RenameSample { id: SampleId, name: String },
+    /// Set a sample's free-form working notes (annotation metadata — "keeper",
+    /// "needs shorter tail"; empty clears them).
+    SetSampleNotes { id: SampleId, notes: String },
     /// Mark a sample as the project root (the one that plays / exports).
     SetRoot { id: SampleId },
 
@@ -368,6 +371,11 @@ pub enum ArrangeOp {
     /// a one-shot reset so an agent can rebuild an arrangement without removing
     /// and re-adding tracks.
     Clear,
+    /// Replace the arrangement's named timeline sections ("intro", "main", …) —
+    /// annotation metadata; playback never interprets them.
+    SetSections {
+        sections: Vec<awsm_audio_schema::ArrSection>,
+    },
 }
 
 impl EditorCommand {
@@ -394,6 +402,7 @@ impl EditorCommand {
                 | EditorCommand::RemoveSample { .. }
                 | EditorCommand::CloneSample { .. }
                 | EditorCommand::RenameSample { .. }
+                | EditorCommand::SetSampleNotes { .. }
                 | EditorCommand::SetRoot { .. }
                 | EditorCommand::SetListener { .. }
         )

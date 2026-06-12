@@ -141,6 +141,8 @@ async fn activity_end() {
     // Still idle and no newer activity since we queued? Then we're truly done.
     if IDLE_GEN.with(|g| g.get()) == gen && IN_FLIGHT.with(|c| c.get()) == 0 {
         WORKING.with(|w| w.set_neq(false));
+        // Clear the live action label + any lingering node glow now we're idle.
+        crate::mcp_activity::idle();
     }
 }
 
@@ -149,6 +151,7 @@ fn activity_reset() {
     IN_FLIGHT.with(|c| c.set(0));
     IDLE_GEN.with(|g| g.set(g.get().wrapping_add(1)));
     WORKING.with(|w| w.set_neq(false));
+    crate::mcp_activity::idle();
 }
 
 /// The control origin the modal pre-fills (defaults to [`default_origin`];
@@ -413,12 +416,16 @@ fn send_frame(frame: WsClientMsg) {
 /// take the async branch.
 async fn serve_one(id: u64, req: Request) {
     activity_begin();
+    // Surface "what's happening now": set the chip label, push the feed, follow
+    // the canvas to the touched sample (see `crate::mcp_activity`).
+    crate::mcp_activity::begin(&req);
     let resp = match req {
         Request::RenderWav {
             sample,
             sample_rate,
             duration_secs,
-        } => render_wav(sample, sample_rate, duration_secs).await,
+            trim_silence,
+        } => render_wav(sample, sample_rate, duration_secs, trim_silence).await,
         Request::AttachWasm {
             node,
             wasm_base64,
@@ -434,6 +441,11 @@ async fn serve_one(id: u64, req: Request) {
         Request::Query(q) if is_wav_query(&q) => render_query(q).await,
         req => dispatch(req),
     };
+    // A command that minted a node returns its id only now — spotlight it so the
+    // eye catches where the agent's new node landed.
+    if let Some(node) = crate::mcp_activity::created_node_id(&resp) {
+        crate::mcp_activity::note_created(node);
+    }
     send_frame(WsClientMsg::Response { id, resp });
     activity_end().await;
 }
@@ -489,6 +501,31 @@ fn dispatch(req: Request) -> Response {
             ctrl.switch_sample(sample);
             Response::Ok
         }
+        Request::ImportSamples { library_toml } => {
+            let lib: awsm_audio_editor_protocol::schema::SampleLibrary =
+                match toml::from_str(&library_toml) {
+                    Ok(l) => l,
+                    Err(e) => return Response::Err(format!("bad library TOML: {e}")),
+                };
+            match ctrl.import_library(lib) {
+                Ok(imported) => Response::Imported(
+                    imported
+                        .into_iter()
+                        .map(|(id, name, kind)| awsm_audio_editor_protocol::SampleInfo {
+                            id,
+                            name,
+                            kind,
+                            is_root: false,
+                            is_active: false,
+                            bounce: None,
+                            duration_secs: None,
+                            notes: String::new(),
+                        })
+                        .collect(),
+                ),
+                Err(e) => Response::Err(e),
+            }
+        }
         Request::RenderWav { .. } | Request::AttachWasm { .. } | Request::LoadAudio { .. } => {
             unreachable!("RenderWav/AttachWasm/LoadAudio are served on the async branch")
         }
@@ -503,12 +540,16 @@ async fn render_wav(
     sample: Option<SampleId>,
     sample_rate: Option<f32>,
     duration_secs: Option<f64>,
+    trim_silence: bool,
 ) -> Response {
     let ctrl = controller();
-    let (channels, rate) = match ctrl.render_pcm(sample, sample_rate, duration_secs).await {
+    let (mut channels, rate) = match ctrl.render_pcm(sample, sample_rate, duration_secs).await {
         Ok(pcm) => pcm,
         Err(e) => return Response::Err(e),
     };
+    if trim_silence {
+        trim_silence_pcm(&mut channels, rate);
+    }
     let wav = crate::util::encode_wav(&channels, rate);
     let byte_len = wav.len();
     let stats = WavStats::from_pcm(&channels, rate);
@@ -523,6 +564,27 @@ async fn render_wav(
         peak: stats.peak,
         rms: stats.rms,
     })
+}
+
+/// Strip leading/trailing frames below the -60 dBFS floor (10^(-60/20)) across
+/// all channels — tight starts and controlled tails for one-shot exports. Leaves
+/// at least one frame; a fully-silent render is left untouched (nothing to keep).
+fn trim_silence_pcm(channels: &mut [Vec<f32>], _rate: u32) {
+    const FLOOR: f32 = 0.001;
+    let frames = channels.iter().map(|c| c.len()).max().unwrap_or(0);
+    let loud = |i: usize| {
+        channels
+            .iter()
+            .any(|c| c.get(i).copied().unwrap_or(0.0).abs() >= FLOOR)
+    };
+    let Some(first) = (0..frames).find(|&i| loud(i)) else {
+        return; // fully silent — leave as-is rather than producing 0 frames
+    };
+    let last = (0..frames).rev().find(|&i| loud(i)).unwrap_or(first);
+    for c in channels.iter_mut() {
+        c.truncate(last + 1);
+        c.drain(..first.min(c.len()));
+    }
 }
 
 /// POST the rendered `.wav` to `<origin>/renders/<render_id>` over plain HTTP —

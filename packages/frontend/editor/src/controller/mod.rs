@@ -454,6 +454,18 @@ impl EditorController {
         self.samples_rev.replace_with(|r| r.wrapping_add(1));
     }
 
+    /// Set a sample's free-form working notes (annotation metadata).
+    fn set_sample_notes_impl(&self, id: awsm_audio_schema::SampleId, notes: String) {
+        if let Some(st) = self
+            .samples
+            .borrow_mut()
+            .iter_mut()
+            .find(|s| s.sample.id == id)
+        {
+            st.sample.notes = notes;
+        }
+    }
+
     /// Delete a sample (never the last one). If it was active/root, repoints.
     pub fn delete_sample(&self, id: awsm_audio_schema::SampleId) {
         self.dispatch(EditorCommand::RemoveSample { id });
@@ -1351,6 +1363,7 @@ impl EditorController {
             EditorCommand::RemoveSample { id } => self.remove_sample_impl(id),
             EditorCommand::CloneSample { id } => self.clone_sample_impl(id),
             EditorCommand::RenameSample { id, name } => self.rename_sample_impl(id, name),
+            EditorCommand::SetSampleNotes { id, notes } => self.set_sample_notes_impl(id, notes),
             EditorCommand::SetRoot { id } => self.set_root_impl(id),
             EditorCommand::AddBoundary { port, x, y } => self.add_boundary_impl(port, x, y),
             EditorCommand::AddSampleRef { sample, x, y } => self.add_sample_ref_impl(sample, x, y),
@@ -1390,11 +1403,18 @@ impl EditorController {
                     .samples
                     .borrow()
                     .iter()
-                    .map(|s| (s.sample.id, s.sample.name.clone(), s.sample.kind))
+                    .map(|s| {
+                        (
+                            s.sample.id,
+                            s.sample.name.clone(),
+                            s.sample.kind,
+                            s.sample.notes.clone(),
+                        )
+                    })
                     .collect();
                 QueryResult::Samples(
                     rows.into_iter()
-                        .map(|(id, name, kind)| {
+                        .map(|(id, name, kind, notes)| {
                             // Bounce state only applies to Sounds.
                             let (bounce, duration_secs) =
                                 if kind == awsm_audio_schema::SampleKind::Sound {
@@ -1413,6 +1433,7 @@ impl EditorController {
                                 is_active: id == active,
                                 bounce,
                                 duration_secs,
+                                notes,
                             }
                         })
                         .collect(),
@@ -1490,6 +1511,47 @@ impl EditorController {
                     })
                     .unwrap_or_default();
                 QueryResult::NodeFields(fields)
+            }
+            // Discovery: every modulatable param across the active canvas — the
+            // graph-wide "what can I automate?" map (per-node form: NodeFields).
+            EditorQuery::ModulationTargets => {
+                use awsm_audio_editor_protocol::ModTargetInfo;
+                let lock = self.nodes.lock_ref();
+                let out = lock
+                    .iter()
+                    .filter(|n| n.boundary.is_none())
+                    .filter_map(|n| {
+                        let k = n.kind.borrow();
+                        let params: Vec<String> = crate::fields::fields(&k)
+                            .iter()
+                            .filter_map(|f| f.modulation.map(|m| m.to_string()))
+                            .collect();
+                        if params.is_empty() {
+                            return None;
+                        }
+                        let label = {
+                            let l = n.label.get_cloned();
+                            if l.is_empty() {
+                                crate::ports::kind_label(&k).to_string()
+                            } else {
+                                l
+                            }
+                        };
+                        let tag = serde_json::to_value(&*k)
+                            .ok()
+                            .and_then(|v| {
+                                v.get("kind").and_then(|t| t.as_str()).map(str::to_string)
+                            })
+                            .unwrap_or_default();
+                        Some(ModTargetInfo {
+                            node: n.id,
+                            label,
+                            kind: tag,
+                            params,
+                        })
+                    })
+                    .collect();
+                QueryResult::ModulationTargets(out)
             }
             // The WAV-readback queries need an async offline render, so the remote
             // transport routes them to a dedicated async path (see `remote.rs`);
@@ -2912,11 +2974,15 @@ impl EditorController {
                     t.clips.clear();
                 }
             }),
+            // Annotation metadata only (no audio effect) — no undo snapshot.
+            ArrangeOp::SetSections { sections } => self.edit_arrange(false, |a| {
+                a.sections = sections;
+            }),
         }
     }
 
     /// The kind of a sample by id.
-    fn sample_kind(
+    pub fn sample_kind(
         &self,
         id: awsm_audio_schema::SampleId,
     ) -> Option<awsm_audio_schema::SampleKind> {
@@ -2928,7 +2994,7 @@ impl EditorController {
     }
 
     /// The display name of a sample by id.
-    fn sample_name(&self, id: awsm_audio_schema::SampleId) -> Option<String> {
+    pub fn sample_name(&self, id: awsm_audio_schema::SampleId) -> Option<String> {
         self.samples
             .borrow()
             .iter()
@@ -3262,17 +3328,38 @@ impl EditorController {
         }
         if awsm_audio_player::document::is_sequence(&sample.graph) {
             let sp = awsm_audio_player::document::sequence_parts(&lib, id);
-            let loop_len = sp.loop_secs.max(0.05);
-            let duration = (loop_len + Self::RELEASE_TAIL).max(Self::MIN_BOUNCE_SECS);
-            RenderPlanInfo {
-                duration_secs: duration,
-                is_sequence: true,
-                loop_secs: Some(loop_len),
-                reason: format!(
-                    "sequencer-driven: renders the {loop_len:.3}s song loop + a \
-                     {:.1}s release tail. Pass duration_secs to override.",
-                    Self::RELEASE_TAIL
-                ),
+            // Output-terminated but nothing sequenced (e.g. a buffer source /
+            // oscillator straight into an Output): that's a continuous one-shot,
+            // not a zero-length loop — mirror the play path's guard so the plan
+            // never reports a bogus 0.05s "loop".
+            let has_parts =
+                !(sp.triggers.is_empty() && sp.control.is_empty()) && sp.loop_secs > 0.0;
+            if has_parts {
+                let loop_len = sp.loop_secs.max(0.05);
+                let duration = (loop_len + Self::RELEASE_TAIL).max(Self::MIN_BOUNCE_SECS);
+                RenderPlanInfo {
+                    duration_secs: duration,
+                    is_sequence: true,
+                    loop_secs: Some(loop_len),
+                    reason: format!(
+                        "sequencer-driven: renders the {loop_len:.3}s song loop + a \
+                         {:.1}s release tail, then STORES exactly the {loop_len:.3}s \
+                         loop (tails fold onto the loop start so clips tile \
+                         seamlessly). Pass duration_secs to instead render and store \
+                         an exact unfolded span.",
+                        Self::RELEASE_TAIL
+                    ),
+                }
+            } else {
+                plain(
+                    Self::DEFAULT_GRAPH_SECS.max(Self::MIN_BOUNCE_SECS),
+                    &format!(
+                        "continuous / one-shot graph (an Output-terminated graph with \
+                         no sequenced notes or control lanes): renders a fixed {:.1}s \
+                         default window. Pass duration_secs to capture a specific span.",
+                        Self::DEFAULT_GRAPH_SECS
+                    ),
+                )
             }
         } else {
             RenderPlanInfo {
@@ -3324,14 +3411,31 @@ impl EditorController {
         let song = awsm_audio_player::document::is_sequence(&sample.graph);
         let (graph, parts, control, duration, loop_secs) = if song {
             let sp = awsm_audio_player::document::sequence_parts(&lib, id);
-            let loop_len = sp.loop_secs.max(0.05);
-            (
-                sp.graph,
-                sp.triggers,
-                sp.control,
-                loop_len + Self::RELEASE_TAIL,
-                Some(loop_len),
-            )
+            // Output-terminated but nothing sequenced (e.g. a loaded buffer
+            // source straight into an Output): a continuous one-shot, NOT a
+            // zero-length loop — without this guard the fold truncated such a
+            // bounce to 0.05s regardless of the source's real length. Mirrors
+            // the play path's empty-parts check.
+            let has_parts =
+                !(sp.triggers.is_empty() && sp.control.is_empty()) && sp.loop_secs > 0.0;
+            if has_parts {
+                let loop_len = sp.loop_secs.max(0.05);
+                (
+                    sp.graph,
+                    sp.triggers,
+                    sp.control,
+                    loop_len + Self::RELEASE_TAIL,
+                    Some(loop_len),
+                )
+            } else {
+                (
+                    sp.graph,
+                    Vec::new(),
+                    Vec::new(),
+                    Self::DEFAULT_GRAPH_SECS,
+                    None,
+                )
+            }
         } else {
             (
                 awsm_audio_schema::flatten(&lib, id),
@@ -3342,8 +3446,13 @@ impl EditorController {
             )
         };
         // An explicit override wins (e.g. capture a fixed span of a procedural /
-        // worklet source that otherwise renders only a tiny default).
-        let duration = duration_override.map(|d| d.max(0.05)).unwrap_or(duration);
+        // worklet source that otherwise renders only a tiny default) — and it is
+        // literal: the stored bounce is exactly that span, with no loop-fold
+        // truncation back to the song loop.
+        let (duration, loop_secs) = match duration_override {
+            Some(d) => (d.max(0.05), None),
+            None => (duration, loop_secs),
+        };
         let job = self.player.borrow().as_ref()?.bounce_job(
             graph,
             parts,
@@ -4078,6 +4187,62 @@ impl EditorController {
         // Load embedded assets (async compile/decode).
         self.load_wasm_assets(lib.assets.wasm_modules.clone());
         self.load_buffer_assets(lib.assets.buffers.clone());
+    }
+
+    /// Merge another library's samples + embedded assets into the open project —
+    /// the `Request::ImportSamples` handler (per-sample patch import; the whole-
+    /// document counterpart is [`open_project`](Self::open_project)). Samples
+    /// whose ids already exist are rejected up front (no partial import); assets
+    /// dedupe by id inside the loaders. Returns the imported `(id, name, kind)`s.
+    pub fn import_library(
+        &self,
+        lib: awsm_audio_schema::SampleLibrary,
+    ) -> Result<
+        Vec<(
+            awsm_audio_schema::SampleId,
+            String,
+            awsm_audio_schema::SampleKind,
+        )>,
+        String,
+    > {
+        if lib.samples.is_empty() {
+            return Err("library has no samples".to_string());
+        }
+        {
+            let samples = self.samples.borrow();
+            for s in &lib.samples {
+                if samples.iter().any(|st| st.sample.id == s.id) {
+                    return Err(format!(
+                        "sample {} (\"{}\") already exists in this project — \
+                         import once, then fork copies with duplicate_sample",
+                        s.id, s.name
+                    ));
+                }
+            }
+        }
+        let mut imported = Vec::new();
+        {
+            let mut samples = self.samples.borrow_mut();
+            for s in &lib.samples {
+                let fallback = layout::auto_layout(&s.graph);
+                let layout = s
+                    .graph
+                    .nodes
+                    .iter()
+                    .map(|n| (n.id, fallback.get(&n.id).copied().unwrap_or((80.0, 80.0))))
+                    .collect();
+                imported.push((s.id, s.name.clone(), s.kind));
+                samples.push(StoredSample {
+                    sample: s.clone(),
+                    layout,
+                });
+            }
+        }
+        self.samples_rev.replace_with(|r| r.wrapping_add(1));
+        // Embedded assets: compile/decode async, same as project open.
+        self.load_wasm_assets(lib.assets.wasm_modules.clone());
+        self.load_buffer_assets(lib.assets.buffers.clone());
+        Ok(imported)
     }
 
     /// Log a warning for each node that references an asset which is neither

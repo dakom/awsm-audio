@@ -10,6 +10,7 @@ mod catalog;
 mod controller;
 mod fields;
 mod fs;
+mod mcp_activity;
 mod ports;
 mod remote;
 mod theme;

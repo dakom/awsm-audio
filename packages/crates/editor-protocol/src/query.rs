@@ -69,6 +69,10 @@ pub enum EditorQuery {
     /// whether it's modulation-targetable). Covers worklet nodes whose params are
     /// discovered at runtime, so `set_field` keys are always discoverable.
     NodeFields { node: NodeId },
+    /// Every modulatable/automatable param across the ACTIVE canvas, grouped by
+    /// node — the graph-wide "what can I modulate or automate?" view (the
+    /// per-node form is `NodeFields`).
+    ModulationTargets,
 }
 
 /// The answer to an [`EditorQuery`]. Serialized back to the caller; also
@@ -90,6 +94,20 @@ pub enum QueryResult {
     Waveform(WaveformEnvelope),
     Catalog(Vec<NodeKindInfo>),
     NodeFields(Vec<FieldInfo>),
+    ModulationTargets(Vec<ModTargetInfo>),
+}
+
+/// One node's modulatable params (the graph-wide automation/modulation map).
+#[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModTargetInfo {
+    pub node: NodeId,
+    /// The node's display label (custom label, else its kind name).
+    pub label: String,
+    /// The kind tag (e.g. `"biquad_filter"`).
+    pub kind: String,
+    /// Param keys accepted by `set_automation` / `modulate` on this node.
+    pub params: Vec<String>,
 }
 
 /// One editable setting of a node — the keys/ranges `set_field` accepts. Mirrors
@@ -160,6 +178,9 @@ pub struct SampleInfo {
     /// Bounced duration in seconds, if this Sound has a bounce.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub duration_secs: Option<f64>,
+    /// Free-form working notes set via `set_sample_notes` (annotation only).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub notes: String,
 }
 
 #[cfg_attr(feature = "schemars", derive(schemars::JsonSchema))]
@@ -227,21 +248,57 @@ pub struct WavStats {
     /// True when `peak > 1.0` — the render clips (distorts) and needs the level
     /// brought down. Saves the caller having to know that 1.0 is the ceiling.
     pub clipping: bool,
+    /// Peak / RMS (linear) — high for spiky transient material, low for dense /
+    /// compressed material. `0` when silent.
+    #[serde(default)]
+    pub crest_factor: f32,
+    /// Mean sample value across all channels — a non-zero offset wastes headroom
+    /// and clicks at clip edges.
+    #[serde(default)]
+    pub dc_offset: f32,
+    /// Leading silence in seconds (below the -60 dBFS floor) — a sound effect
+    /// usually wants a tight (~0) start.
+    #[serde(default)]
+    pub leading_silence_secs: f64,
+    /// Trailing silence in seconds (below the -60 dBFS floor).
+    #[serde(default)]
+    pub trailing_silence_secs: f64,
+    /// Time from the first non-silent frame to the absolute peak — approximate
+    /// attack (short = percussive, long = swelling).
+    #[serde(default)]
+    pub attack_secs: f64,
+    /// Time from the absolute peak to the last non-silent frame — approximate
+    /// decay / tail length.
+    #[serde(default)]
+    pub decay_secs: f64,
+    /// Estimated inter-sample (true) peak via 4× cubic-Hermite oversampling —
+    /// can exceed `peak` when the waveform crests between samples. An estimate,
+    /// not an ITU-R BS.1770 measurement.
+    #[serde(default)]
+    pub true_peak: f32,
 }
+
+/// The -60 dBFS amplitude floor for the silence / attack / decay readbacks
+/// (10^(-60/20)).
+const SILENCE_FLOOR: f32 = 0.001;
 
 impl WavStats {
     /// Compute stats over rendered PCM (`channels[ch][frame]`): peak = max abs
-    /// across all channels; rms = sqrt(mean of squares); duration = frames / rate.
+    /// across all channels; rms = sqrt(mean of squares); duration = frames / rate;
+    /// plus the transient/tail readbacks (crest factor, DC offset, lead/trail
+    /// silence, approximate attack/decay) against a -60 dBFS floor.
     /// Pure f32/f64 math — natively testable, no audio/DOM deps.
     pub fn from_pcm(channels: &[Vec<f32>], sample_rate: u32) -> Self {
         let frames = channels.iter().map(|c| c.len()).max().unwrap_or(0);
         let mut peak = 0.0f32;
         let mut sum_sq = 0.0f64;
+        let mut sum = 0.0f64;
         let mut count = 0u64;
         for ch in channels {
             for &s in ch {
                 peak = peak.max(s.abs());
                 sum_sq += (s as f64) * (s as f64);
+                sum += s as f64;
                 count += 1;
             }
         }
@@ -250,11 +307,72 @@ impl WavStats {
         } else {
             0.0
         };
+        let dc_offset = if count > 0 {
+            (sum / count as f64) as f32
+        } else {
+            0.0
+        };
         let duration_secs = if sample_rate > 0 {
             frames as f64 / sample_rate as f64
         } else {
             0.0
         };
+
+        // Frame-wise envelope (max |s| across channels per frame) for the
+        // silence / attack / decay readbacks.
+        let frame_abs = |i: usize| -> f32 {
+            channels
+                .iter()
+                .map(|c| c.get(i).copied().unwrap_or(0.0).abs())
+                .fold(0.0, f32::max)
+        };
+        let secs = |n: usize| -> f64 {
+            if sample_rate > 0 {
+                n as f64 / sample_rate as f64
+            } else {
+                0.0
+            }
+        };
+        let first_loud = (0..frames).find(|&i| frame_abs(i) >= SILENCE_FLOOR);
+        let last_loud = (0..frames).rev().find(|&i| frame_abs(i) >= SILENCE_FLOOR);
+        let peak_at = (0..frames).max_by(|&a, &b| frame_abs(a).total_cmp(&frame_abs(b)));
+
+        // Inter-sample (true) peak estimate: 4× oversample each channel with a
+        // 4-point cubic Hermite (Catmull-Rom) and track the max magnitude.
+        let mut true_peak = peak;
+        for ch in channels {
+            let n = ch.len();
+            let at = |i: isize| -> f32 {
+                if i < 0 || i as usize >= n {
+                    0.0
+                } else {
+                    ch[i as usize]
+                }
+            };
+            for i in 0..n as isize {
+                let (y0, y1, y2, y3) = (at(i - 1), at(i), at(i + 1), at(i + 2));
+                for k in 1..4 {
+                    let t = k as f32 / 4.0;
+                    let a = 0.5 * (3.0 * (y1 - y2) + y3 - y0);
+                    let b = y0 - 2.5 * y1 + 2.0 * y2 - 0.5 * y3;
+                    let c = 0.5 * (y2 - y0);
+                    let v = ((a * t + b) * t + c) * t + y1;
+                    true_peak = true_peak.max(v.abs());
+                }
+            }
+        }
+        let (leading_silence_secs, trailing_silence_secs, attack_secs, decay_secs) =
+            match (first_loud, last_loud, peak_at) {
+                (Some(first), Some(last), Some(at)) => (
+                    secs(first),
+                    secs(frames - 1 - last),
+                    secs(at.saturating_sub(first)),
+                    secs(last.saturating_sub(at)),
+                ),
+                // Entirely silent (or empty) — everything is "silence".
+                _ => (duration_secs, duration_secs, 0.0, 0.0),
+            };
+
         Self {
             duration_secs,
             peak,
@@ -262,6 +380,13 @@ impl WavStats {
             channels: channels.len() as u32,
             sample_rate,
             clipping: peak > 1.0,
+            crest_factor: if rms > 0.0 { peak / rms } else { 0.0 },
+            dc_offset,
+            leading_silence_secs,
+            trailing_silence_secs,
+            attack_secs,
+            decay_secs,
+            true_peak,
         }
     }
 }

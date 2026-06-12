@@ -110,6 +110,7 @@ pub fn render() -> Dom {
         .child(examples_modal::render())
         .child(help_modal::render())
         .child(mcp_modal::render())
+        .child(mcp_modal::feed_panel())
         .child(sample_picker_modal::render())
         .child(piano_roll::render())
     })

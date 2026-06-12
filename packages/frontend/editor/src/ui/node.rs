@@ -85,6 +85,7 @@ pub fn render(node: Rc<EditorNode>) -> Dom {
     // trigger inlet (where a sequencer's keyed output binds). It coexists with
     // the referenced sound's audio inlets.
     let trigger_inlet = sample_ref.is_some();
+    let node_id = node.id;
     drop(kind);
 
     html!("div", {
@@ -115,6 +116,15 @@ pub fn render(node: Rc<EditorNode>) -> Dom {
                 "0 0 0 2px var(--accent-line), 0 6px 18px oklch(0 0 0 / 0.4)".to_string()
             } else {
                 "0 6px 18px oklch(0 0 0 / 0.4)".to_string()
+            }
+        }))
+        // MCP auto-follow spotlight: a one-shot glow (no `forwards`, so it reverts
+        // to the box-shadow above) when the agent touches this node.
+        .style_signal("animation", crate::mcp_activity::spotlight().signal().map(move |spot| {
+            if spot == Some(node_id) {
+                "mcp-spotlight 1.1s ease-out".to_string()
+            } else {
+                "none".to_string()
             }
         }))
         // Press the body: select, then begin a (possibly group) move drag.

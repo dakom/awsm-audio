@@ -26,10 +26,12 @@ use rmcp::{
 };
 use serde_json::Value;
 
-use awsm_audio_editor_protocol::schema::{NodeId, NodeKind, SampleId, SampleKind};
+use awsm_audio_editor_protocol::schema::{
+    ArrSection, AutomationEvent, NodeId, NodeKind, SampleId, SampleKind,
+};
 use awsm_audio_editor_protocol::{
-    ArrangeOp, AssetInfo, EditorCommand, EditorQuery, FieldValue, PlacedClip, QueryResult, Request,
-    Response,
+    ArrangeOp, AssetInfo, BoundaryPort, EditorCommand, EditorQuery, FieldValue, PlacedClip,
+    QueryResult, Request, Response,
 };
 
 use std::sync::Arc;
@@ -93,6 +95,10 @@ pub struct RenderWavParams {
     /// source that otherwise renders only a tiny default. Omit for the default.
     #[serde(default)]
     pub duration_secs: Option<f64>,
+    /// Strip leading/trailing silence (below -60 dBFS) before encoding — tight
+    /// starts and controlled tails for one-shot exports.
+    #[serde(default)]
+    pub trim_silence: bool,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
@@ -130,10 +136,11 @@ pub struct WaveformParams {
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct AddNodeParams {
-    /// The node kind to create — a `NodeKind` value, adjacently tagged
-    /// (`{"kind":"<tag>","props":{…}}`). The param schema lists every kind and its
-    /// props; `list_node_kinds` gives a copy-paste `example` + docs per kind. The
-    /// editor mints the node id — read it back from a follow-up `get_snapshot`.
+    /// The node kind to create — either a bare kind-name string with default
+    /// props (`"oscillator"`, `"gain"`, … — any tag from `list_node_kinds`), or a
+    /// full `NodeKind` value, adjacently tagged (`{"kind":"<tag>","props":{…}}`).
+    /// The param schema lists every kind and its props; `list_node_kinds` gives a
+    /// copy-paste `example` + docs per kind.
     pub kind: Flexible<NodeKind>,
     pub x: f64,
     pub y: f64,
@@ -159,15 +166,181 @@ pub struct AddChainParams {
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct RefBatchParams {
-    /// EditorCommands applied in order in one round-trip, with **symbolic refs**:
-    /// each command is the usual `{"cmd":…,"args":…}` object plus an optional
-    /// `"ref":"<name>"` that labels the id it mints. Any later command can use
-    /// `"$<name>"` anywhere an id is expected and it's substituted with the real
-    /// id before dispatch — so a create-then-connect flow is one tool call:
-    /// `[{"cmd":"add_node","ref":"osc","args":{…}},
-    ///   {"cmd":"add_node","ref":"amp","args":{…}},
+    /// EditorCommands applied in order in one round-trip, with **symbolic refs**.
+    /// Each element is a command **object** — `{"cmd":…,"args":…}` (NOT a
+    /// JSON-encoded string; stringified objects are tolerated but discouraged) —
+    /// plus an optional `"ref":"<name>"` that labels the id it mints. Any later
+    /// command can use `"$<name>"` anywhere an id is expected and it's
+    /// substituted with the real id before dispatch — so a create-then-connect
+    /// flow is one tool call:
+    /// `[{"cmd":"add_node","ref":"osc","args":{"kind":"oscillator","x":0,"y":0}},
+    ///   {"cmd":"add_node","ref":"amp","args":{"kind":"gain","x":200,"y":0}},
     ///   {"cmd":"connect","args":{"from":"$osc","to":"$amp"}}]`.
+    /// (`add_node` args accept a bare kind tag, expanded to default props.)
     pub commands: Vec<serde_json::Value>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct AddBoundaryParams {
+    /// `"inlet"` (a sample input — feeds signal in) or `"outlet"` (a sample
+    /// output — emits signal out; an instrument Sound needs one).
+    pub port: BoundaryPort,
+    /// World x position.
+    #[serde(default)]
+    pub x: f64,
+    /// World y position.
+    #[serde(default)]
+    pub y: f64,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct SetAutomationParams {
+    /// Target node id (from get_snapshot / add_node).
+    pub node: NodeId,
+    /// The AudioParam to automate, by its field key — e.g. `"gain"`,
+    /// `"frequency"` (see get_node_fields for a node's automatable keys).
+    pub param: String,
+    /// The complete scheduled timeline for that param (REPLACES any existing
+    /// events). Times are seconds — from note-on for a triggered instrument
+    /// voice, from render start otherwise. Each event is adjacently tagged
+    /// `{"event":"<name>","args":{…}}`; the schema lists every accepted shape.
+    pub events: Vec<AutomationEvent>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct ValidateParams {
+    /// Commands to validate without dispatching — the same shapes
+    /// dispatch_batch / dispatch_refs accept, including `"ref"` labels,
+    /// `"$ref"` placeholders, and bare node-kind tags in add_node.
+    pub commands: Vec<Value>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct CreateArrangementParams {
+    /// Tempo in BPM (the bar/beat grid). Omit for the default.
+    #[serde(default)]
+    pub bpm: Option<f64>,
+    /// Timeline length in seconds. Omit for the default.
+    #[serde(default)]
+    pub length_secs: Option<f64>,
+    /// Initial track names, top to bottom (e.g. `["Drums","Bass","Lead"]`) —
+    /// saves one add_arrangement_track + set_track_name round-trip per track.
+    #[serde(default)]
+    pub tracks: Option<Vec<String>>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct AddTracksParams {
+    /// Names for the new tracks, appended in order (one add+rename per name,
+    /// applied in a single round-trip).
+    pub names: Vec<String>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct TrackGainItem {
+    /// 0-based track index.
+    pub track: usize,
+    /// Linear gain (1.0 = unity).
+    pub gain: f32,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct TrackGainsParams {
+    /// Per-track gains to set, applied in one round-trip.
+    pub gains: Vec<TrackGainItem>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct DuplicateSampleParams {
+    /// The Sound or Arrangement to duplicate (graph, trigger, arrangement,
+    /// bounce — everything).
+    pub sample: SampleId,
+    /// Name for the copy. Omit for `"<original> (clone)"`.
+    #[serde(default)]
+    pub name: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct CompareSamplesParams {
+    /// First sample to render + measure.
+    pub a: SampleId,
+    /// Second sample to render + measure.
+    pub b: SampleId,
+    /// Shared render window in seconds (live renders only) — pass it so both
+    /// sides measure the same span. Omit for each side's auto length.
+    #[serde(default)]
+    pub duration_secs: Option<f64>,
+    /// false (default): measure each LIVE graph; true: measure the stored
+    /// BOUNCED assets (errors if either side has no bounce).
+    #[serde(default)]
+    pub bounced: bool,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct ExportWavParams {
+    /// Destination `.wav` path. A directory (or trailing `/`) gets
+    /// `<sample-name>.wav` appended. Relative paths resolve against the MCP
+    /// server's working directory — prefer an absolute path.
+    pub path: String,
+    /// Sound/Arrangement to render. Omit to render the project root.
+    #[serde(default)]
+    pub sample: Option<SampleId>,
+    /// Override the render sample rate (Hz).
+    #[serde(default)]
+    pub sample_rate: Option<f32>,
+    /// Fixed render length in seconds (see render_wav).
+    #[serde(default)]
+    pub duration_secs: Option<f64>,
+    /// Strip leading/trailing silence (below -60 dBFS) before encoding.
+    #[serde(default)]
+    pub trim_silence: bool,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct NotesParams {
+    /// The sample to annotate.
+    pub sample: SampleId,
+    /// Free-form working notes ("impact variant", "keeper", "needs shorter
+    /// tail"). Empty clears them. Shown in list_samples.
+    #[serde(default)]
+    pub notes: String,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct SectionsParams {
+    /// Named timeline regions, e.g. `[{"name":"intro","start":0,"end":8}, …]`
+    /// (seconds). REPLACES the arrangement's whole section list; empty clears.
+    pub sections: Vec<ArrSection>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct SweepParams {
+    /// The node whose field to sweep.
+    pub node: NodeId,
+    /// The set_field key to vary (see get_node_fields).
+    pub key: String,
+    /// The values to try, in order (each is set, rendered, measured).
+    pub values: Vec<f64>,
+    /// Render window per measurement in seconds. Omit for the auto length.
+    #[serde(default)]
+    pub duration_secs: Option<f64>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct ExportSampleParams {
+    /// The sample to export (with every sub-sample it references and the assets
+    /// they use).
+    pub sample: SampleId,
+    /// Destination `.toml` path. A directory (or trailing `/`) gets
+    /// `<sample-name>.toml` appended. Relative paths resolve against the MCP
+    /// server's working directory — prefer an absolute path.
+    pub path: String,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct ImportSampleParams {
+    /// Path to a `.toml` written by export_sample (or any SampleLibrary TOML).
+    pub path: String,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
@@ -534,6 +707,61 @@ impl EditorMcp {
         self.query(EditorQuery::NodeFields { node: p.node }).await
     }
 
+    #[tool(description = "Every modulatable/automatable param across the ACTIVE \
+        canvas, grouped by node: `[{node, label, kind, params}]`. The graph-wide \
+        \"what can I modulate or automate?\" map — these params are exactly what \
+        `set_automation` and `modulate` (the param targets of `connect`-style \
+        wiring via dispatch_command) accept. Per-node detail (ranges, current \
+        values): get_node_fields.")]
+    async fn list_modulation_targets(&self) -> Result<CallToolResult, McpError> {
+        self.query(EditorQuery::ModulationTargets).await
+    }
+
+    #[tool(description = "Report this session's editor pairing state WITHOUT \
+        performing an editor operation: whether an editor tab is bound (or would \
+        auto-bind), this session's pairing code, and how many tabs/agents are \
+        connected. Call this first — or after a 'no editor is paired' error — to \
+        know whether to wait or surface the pairing code, instead of issuing \
+        doomed audio calls.")]
+    async fn pairing_status(&self) -> Result<CallToolResult, McpError> {
+        let editors = self.link.connection_count();
+        let agents = self.link.agent_count();
+        let bound = self.agent.bound_conn_id().is_some();
+        // Mirrors `resolve`'s auto-bind rule: 1 unbound tab + 1 agent binds on
+        // the next request, so report that as ready-to-pair.
+        let will_auto_bind = !bound && editors == 1 && agents == 1;
+        let authority = self
+            .link
+            .self_origin()
+            .trim_start_matches("http://")
+            .trim_start_matches("https://")
+            .to_string();
+        let status = if bound {
+            "paired"
+        } else if will_auto_bind {
+            "ready (auto-binds on the next editor operation)"
+        } else if editors == 0 {
+            "waiting for an editor tab to connect"
+        } else {
+            "ambiguous — pairing code required"
+        };
+        Ok(text(
+            serde_json::json!({
+                "status": status,
+                "paired": bound,
+                "editors_connected": editors,
+                "agents_connected": agents,
+                "pair_code": self.agent.pair_code,
+                "how_to_pair": format!(
+                    "open the editor with ?mcp={authority}&pair={} appended to its URL, \
+                     or enter the code in its MCP connect modal",
+                    self.agent.pair_code
+                ),
+            })
+            .to_string(),
+        ))
+    }
+
     #[tool(description = "List every sample (id, name, kind, root/active flags).")]
     async fn list_samples(&self) -> Result<CallToolResult, McpError> {
         self.query(EditorQuery::Samples).await
@@ -606,6 +834,7 @@ impl EditorMcp {
             sample: p.sample,
             sample_rate: p.sample_rate,
             duration_secs: p.duration_secs,
+            trim_silence: p.trim_silence,
         };
         self.wav(req).await
     }
@@ -828,20 +1057,80 @@ impl EditorMcp {
     }
 
     #[tool(
+        description = "Add an inlet/outlet boundary node at world (x, y) — the \
+        typed form of dispatch_command add_boundary. An instrument Sound needs an \
+        `outlet` so referencing graphs (and the renderer) can read its signal. \
+        Returns the minted node id."
+    )]
+    async fn add_boundary(
+        &self,
+        Parameters(p): Parameters<AddBoundaryParams>,
+    ) -> Result<CallToolResult, McpError> {
+        self.dispatch(EditorCommand::AddBoundary {
+            port: p.port,
+            x: p.x,
+            y: p.y,
+        })
+        .await
+    }
+
+    #[tool(
+        description = "Replace the automation timeline of a node's AudioParam — \
+        the typed form of dispatch_command set_automation, for envelopes and \
+        parameter motion (attack/decay on a voice's gain, a filter sweep, …). \
+        Times are seconds from note-on (triggered instrument voices) or from \
+        render start. The `events` schema lists every accepted event shape; e.g. \
+        a simple AD envelope on `gain` is \
+        [{\"event\":\"set_value\",\"args\":{\"value\":0.0,\"time\":0.0}}, \
+        {\"event\":\"linear_ramp\",\"args\":{\"value\":1.0,\"time\":0.01}}, \
+        {\"event\":\"exponential_ramp\",\"args\":{\"value\":0.001,\"time\":0.4}}]."
+    )]
+    async fn set_automation(
+        &self,
+        Parameters(p): Parameters<SetAutomationParams>,
+    ) -> Result<CallToolResult, McpError> {
+        self.dispatch(EditorCommand::SetAutomation {
+            id: p.node,
+            param: p.param,
+            events: p.events,
+        })
+        .await
+    }
+
+    #[tool(
         description = "Render a Sound (`sample`) offline and store it as that \
-        sample's bounce (so it can be dropped into an arrangement). Pass \
-        `duration_secs` to capture a fixed span of a procedural / worklet source \
-        that otherwise renders only a tiny default. Blocks until the render lands \
-        or a ~30 s safety timeout (no manual polling), then returns the result's \
-        {duration_secs, peak, rms, clipping} — so you see immediately whether it \
-        clipped (peak > 1.0) without a separate wav_stats call. On timeout it \
-        returns the last status; re-check get_bounce_status / list_assets."
+        sample's bounce (so it can be dropped into an arrangement). Sequenced \
+        Sounds render their loop + a release tail but STORE exactly the loop \
+        (tails fold onto the loop start so clips tile seamlessly) — the result \
+        reports both rendered_duration_secs and stored_duration_secs. Pass \
+        `duration_secs` to instead render and store an exact unfolded span (e.g. \
+        a fixed window of a procedural / worklet / buffer source). Blocks until \
+        the render lands or a ~30 s safety timeout (no manual polling), then \
+        returns {stored_duration_secs, rendered_duration_secs, peak, rms, \
+        clipping} — so you see immediately whether it clipped (peak > 1.0) \
+        without a separate wav_stats call. On timeout it returns the last \
+        status; re-check get_bounce_status / list_assets."
     )]
     async fn bounce(
         &self,
         Parameters(p): Parameters<BounceParams>,
     ) -> Result<CallToolResult, McpError> {
         use std::time::{Duration, Instant};
+        // The plan, read up-front: what the un-overridden render will run
+        // (loop + tail for sequences), so the result can report rendered vs
+        // stored without the agent reconciling them (they legitimately differ).
+        let rendered_duration = match p.duration_secs {
+            Some(d) => d,
+            None => match self
+                .query_result(EditorQuery::RenderPlan {
+                    sample: Some(p.sample),
+                })
+                .await?
+            {
+                QueryResult::RenderPlan(plan) => plan.duration_secs,
+                other => return Err(unexpected_query(other)),
+            },
+        };
         // Kick off the (async) offline render.
         self.dispatch(EditorCommand::Bounce {
             sample: p.sample,
@@ -880,6 +1169,11 @@ impl EditorMcp {
                     serde_json::json!({
                         "status": "clean",
                         "sample": p.sample,
+                        // What plays from arrangements (the stored asset)…
+                        "stored_duration_secs": stats.duration_secs,
+                        // …vs what the offline render ran (loop + tail for a
+                        // sequence; identical when duration_secs was passed).
+                        "rendered_duration_secs": rendered_duration,
                         "duration_secs": stats.duration_secs,
                         "peak": stats.peak,
                         "rms": stats.rms,
@@ -963,24 +1257,169 @@ impl EditorMcp {
         .await
     }
 
+    #[tool(
+        description = "Replace the active arrangement's named timeline sections \
+        (\"intro\", \"main\", \"outro\" — start/end in seconds). Annotation \
+        metadata for navigation while arranging; playback never interprets it. \
+        Read back via get_arrangement. Empty clears."
+    )]
+    async fn set_arrangement_sections(
+        &self,
+        Parameters(p): Parameters<SectionsParams>,
+    ) -> Result<CallToolResult, McpError> {
+        for s in &p.sections {
+            if s.end <= s.start {
+                return Err(McpError::invalid_params(
+                    format!(
+                        "section \"{}\": end ({}) must be > start ({})",
+                        s.name, s.end, s.start
+                    ),
+                    None,
+                ));
+            }
+        }
+        self.arrange(ArrangeOp::SetSections {
+            sections: p.sections,
+        })
+        .await
+    }
+
     // ── arrangement editing (dedicated wrappers over EditArrange) ────────────
     // These edit the *active* sample, which must be an Arrangement — switch to
     // one with set_active_sample (or create_arrangement) first.
 
-    #[tool(
-        description = "Create a new (empty) Arrangement sample and make it active. \
-        Build it with add_arrangement_track + add_clip; find its id via list_samples."
-    )]
-    async fn create_arrangement(&self) -> Result<CallToolResult, McpError> {
-        self.dispatch(EditorCommand::AddSample {
-            kind: SampleKind::Arrangement,
-        })
-        .await
+    #[tool(description = "Create a new Arrangement sample and make it active — \
+        optionally with its BPM, timeline length, and named tracks in the same \
+        call (one round-trip instead of one per track). Returns the minted id. \
+        Build it further with add_clip / add_clips.")]
+    async fn create_arrangement(
+        &self,
+        Parameters(p): Parameters<CreateArrangementParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let id = self
+            .dispatch_created(EditorCommand::AddSample {
+                kind: SampleKind::Arrangement,
+            })
+            .await?
+            .ok_or_else(|| McpError::internal_error("create returned no id", None))?;
+        // The new arrangement is active, so the EditArrange setup ops target it.
+        let mut cmds: Vec<EditorCommand> = Vec::new();
+        if let Some(bpm) = p.bpm {
+            cmds.push(EditorCommand::EditArrange {
+                op: ArrangeOp::SetBpm(bpm),
+            });
+        }
+        if let Some(len) = p.length_secs {
+            cmds.push(EditorCommand::EditArrange {
+                op: ArrangeOp::SetLengthSecs(len),
+            });
+        }
+        let tracks = p.tracks.unwrap_or_default();
+        for (i, name) in tracks.iter().enumerate() {
+            cmds.push(EditorCommand::EditArrange {
+                op: ArrangeOp::AddTrack,
+            });
+            cmds.push(EditorCommand::EditArrange {
+                op: ArrangeOp::SetTrackName {
+                    track: i,
+                    name: name.clone(),
+                },
+            });
+        }
+        if !cmds.is_empty() {
+            match self.req(Request::DispatchBatch(cmds)).await? {
+                Response::Batch(_) | Response::Ok => {}
+                Response::Err(e) => return Err(McpError::internal_error(e, None)),
+                other => return Err(unexpected(other)),
+            }
+        }
+        Ok(text(
+            serde_json::json!({ "ok": true, "id": id, "tracks": tracks }).to_string(),
+        ))
     }
 
     #[tool(description = "Append an empty track to the active arrangement.")]
     async fn add_arrangement_track(&self) -> Result<CallToolResult, McpError> {
         self.arrange(ArrangeOp::AddTrack).await
+    }
+
+    #[tool(
+        description = "Append several named tracks to the active arrangement in \
+        ONE round-trip (each is an add + rename) — use this instead of repeated \
+        add_arrangement_track + set_track_name calls. Returns the new tracks' \
+        indices."
+    )]
+    async fn add_arrangement_tracks(
+        &self,
+        Parameters(p): Parameters<AddTracksParams>,
+    ) -> Result<CallToolResult, McpError> {
+        if p.names.is_empty() {
+            return Err(McpError::invalid_params("names must be non-empty", None));
+        }
+        // New tracks land after the existing ones — read the current count so
+        // the rename ops target the right indices.
+        let base = match self.query_result(EditorQuery::Arrangement).await? {
+            QueryResult::Arrangement(Some(a)) => a.tracks.len(),
+            QueryResult::Arrangement(None) => {
+                return Err(McpError::invalid_params(
+                    "active sample is not an arrangement — set_active_sample to one first",
+                    None,
+                ));
+            }
+            other => return Err(unexpected_query(other)),
+        };
+        let mut cmds: Vec<EditorCommand> = Vec::new();
+        for (i, name) in p.names.iter().enumerate() {
+            cmds.push(EditorCommand::EditArrange {
+                op: ArrangeOp::AddTrack,
+            });
+            cmds.push(EditorCommand::EditArrange {
+                op: ArrangeOp::SetTrackName {
+                    track: base + i,
+                    name: name.clone(),
+                },
+            });
+        }
+        match self.req(Request::DispatchBatch(cmds)).await? {
+            Response::Batch(_) | Response::Ok => {}
+            Response::Err(e) => return Err(McpError::internal_error(e, None)),
+            other => return Err(unexpected(other)),
+        }
+        let added: Vec<Value> = p
+            .names
+            .iter()
+            .enumerate()
+            .map(|(i, n)| serde_json::json!({ "track": base + i, "name": n }))
+            .collect();
+        Ok(text(serde_json::json!({ "added": added }).to_string()))
+    }
+
+    #[tool(
+        description = "Set several tracks' gains on the active arrangement in ONE \
+        round-trip — the batch form of set_track_gain, for mix passes."
+    )]
+    async fn set_track_gains(
+        &self,
+        Parameters(p): Parameters<TrackGainsParams>,
+    ) -> Result<CallToolResult, McpError> {
+        if p.gains.is_empty() {
+            return Err(McpError::invalid_params("gains must be non-empty", None));
+        }
+        let cmds: Vec<EditorCommand> = p
+            .gains
+            .iter()
+            .map(|g| EditorCommand::EditArrange {
+                op: ArrangeOp::SetTrackGain {
+                    track: g.track,
+                    gain: g.gain,
+                },
+            })
+            .collect();
+        match self.req(Request::DispatchBatch(cmds)).await? {
+            Response::Batch(_) | Response::Ok => Ok(text("ok")),
+            Response::Err(e) => Err(McpError::internal_error(e, None)),
+            other => Err(unexpected(other)),
+        }
     }
 
     #[tool(description = "Remove a track (by 0-based index) from the active arrangement.")]
@@ -1281,6 +1720,391 @@ impl EditorMcp {
         .await
     }
 
+    #[tool(description = "Set a sample's free-form working notes — annotation \
+        metadata for experiments (\"impact variant\", \"keeper\", \
+        \"needs shorter tail\") without encoding state in the name. Shown in \
+        list_samples; saved with the project; never interpreted by playback. \
+        Empty clears.")]
+    async fn set_sample_notes(
+        &self,
+        Parameters(p): Parameters<NotesParams>,
+    ) -> Result<CallToolResult, McpError> {
+        self.dispatch(EditorCommand::SetSampleNotes {
+            id: p.sample,
+            notes: p.notes,
+        })
+        .await
+    }
+
+    #[tool(
+        description = "Duplicate a sample — graph, trigger, arrangement, bounce, \
+        everything — under a new id, and make the copy active. Fork a patch to \
+        try a variant, compare with compare_samples, keep the better one. \
+        Returns the new id."
+    )]
+    async fn duplicate_sample(
+        &self,
+        Parameters(p): Parameters<DuplicateSampleParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let id = self
+            .dispatch_created(EditorCommand::CloneSample { id: p.sample })
+            .await?
+            .ok_or_else(|| {
+                McpError::invalid_params(format!("no sample {} to duplicate", p.sample), None)
+            })?;
+        if let Some(name) = &p.name {
+            let new_id: SampleId = id
+                .parse()
+                .map_err(|e| McpError::internal_error(format!("bad minted id: {e}"), None))?;
+            self.dispatch(EditorCommand::RenameSample {
+                id: new_id,
+                name: name.clone(),
+            })
+            .await?;
+        }
+        Ok(text(
+            serde_json::json!({ "ok": true, "id": id, "name": p.name }).to_string(),
+        ))
+    }
+
+    #[tool(
+        description = "Render two samples and return their stats side by side \
+        plus deltas (peak/RMS in dB, durations) — A/B a fork made with \
+        duplicate_sample, or any two Sounds. Pass duration_secs so both sides \
+        measure the same window; bounced=true compares the stored bounces \
+        instead of the live graphs. Purely mechanical numbers — which one is \
+        'better' is your call."
+    )]
+    async fn compare_samples(
+        &self,
+        Parameters(p): Parameters<CompareSamplesParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let stats_of = |sample: SampleId| {
+            self.query_result(EditorQuery::WavStats {
+                sample: Some(sample),
+                bounced: p.bounced,
+                duration_secs: p.duration_secs,
+            })
+        };
+        let a = match stats_of(p.a).await? {
+            QueryResult::WavStats(s) => s,
+            other => return Err(unexpected_query(other)),
+        };
+        let b = match stats_of(p.b).await? {
+            QueryResult::WavStats(s) => s,
+            other => return Err(unexpected_query(other)),
+        };
+        let db = |x: f32, y: f32| -> Option<f32> {
+            (x > 0.0 && y > 0.0).then(|| 20.0 * (x / y).log10())
+        };
+        Ok(text(
+            serde_json::json!({
+                "a": { "sample": p.a, "stats": a },
+                "b": { "sample": p.b, "stats": b },
+                "delta": {
+                    "peak_db_a_minus_b": db(a.peak, b.peak),
+                    "rms_db_a_minus_b": db(a.rms, b.rms),
+                    "duration_secs_a_minus_b": a.duration_secs - b.duration_secs,
+                },
+            })
+            .to_string(),
+        ))
+    }
+
+    #[tool(
+        description = "Sweep one numeric field across several values: for each, \
+        set it, render the ACTIVE sample, and return that value's wav stats — \
+        then restore the original value. Mechanical exploration support (which \
+        cutoff/feedback/rate does what); judging the results is your call. \
+        Returns `[{value, stats}]`. Long sweeps render once per value — keep \
+        `values` short and `duration_secs` small."
+    )]
+    async fn parameter_sweep(
+        &self,
+        Parameters(p): Parameters<SweepParams>,
+    ) -> Result<CallToolResult, McpError> {
+        if p.values.is_empty() {
+            return Err(McpError::invalid_params("values must be non-empty", None));
+        }
+        if p.values.len() > 16 {
+            return Err(McpError::invalid_params(
+                "at most 16 values per sweep (each is a full offline render)",
+                None,
+            ));
+        }
+        // The active sample is what renders; the node must live on its canvas.
+        let active = match self.query_result(EditorQuery::Samples).await? {
+            QueryResult::Samples(samples) => samples
+                .iter()
+                .find(|s| s.is_active)
+                .map(|s| s.id)
+                .ok_or_else(|| McpError::internal_error("no active sample reported", None))?,
+            other => return Err(unexpected_query(other)),
+        };
+        // Remember the original value so the sweep is non-destructive.
+        let original = match self
+            .query_result(EditorQuery::NodeFields { node: p.node })
+            .await?
+        {
+            QueryResult::NodeFields(fields) => fields
+                .iter()
+                .find(|f| f.key == p.key)
+                .and_then(|f| f.value_num),
+            other => return Err(unexpected_query(other)),
+        };
+        let set = |value: f64| {
+            self.req(Request::Dispatch(EditorCommand::SetField {
+                id: p.node,
+                key: p.key.clone(),
+                value: FieldValue::Num(value),
+            }))
+        };
+        let mut points: Vec<Value> = Vec::with_capacity(p.values.len());
+        for &value in &p.values {
+            set(value).await?;
+            let stats = match self
+                .query_result(EditorQuery::WavStats {
+                    sample: Some(active),
+                    bounced: false,
+                    duration_secs: p.duration_secs,
+                })
+                .await?
+            {
+                QueryResult::WavStats(s) => s,
+                other => return Err(unexpected_query(other)),
+            };
+            points.push(serde_json::json!({ "value": value, "stats": stats }));
+        }
+        if let Some(orig) = original {
+            set(orig).await?;
+        }
+        Ok(text(
+            serde_json::json!({
+                "node": p.node,
+                "key": p.key,
+                "restored_to": original,
+                "points": points,
+            })
+            .to_string(),
+        ))
+    }
+
+    #[tool(description = "Export a sample as a portable patch: a self-contained \
+        SampleLibrary TOML holding the sample, every sub-sample it references, \
+        and the assets they use (WASM modules, audio buffers, bounces) — \
+        experiments are valuable as patches, not just rendered audio. Re-open \
+        with import_sample (any project). A directory path gets \
+        `<sample-name>.toml` appended.")]
+    async fn export_sample(
+        &self,
+        Parameters(p): Parameters<ExportSampleParams>,
+    ) -> Result<CallToolResult, McpError> {
+        use awsm_audio_editor_protocol::schema::SampleLibrary;
+        let project = match self.query_result(EditorQuery::Project).await? {
+            QueryResult::Project(proj) => proj,
+            other => return Err(unexpected_query(other)),
+        };
+        let lib = project.library;
+        // Transitive closure over Sample-ref nodes, starting at the target.
+        let mut keep: Vec<SampleId> = vec![p.sample];
+        let mut i = 0;
+        while i < keep.len() {
+            let id = keep[i];
+            i += 1;
+            let Some(sample) = lib.samples.iter().find(|s| s.id == id) else {
+                return Err(McpError::invalid_params(format!("no sample {id}"), None));
+            };
+            for node in &sample.graph.nodes {
+                if let NodeKind::Sample(sr) = &node.kind {
+                    if !keep.contains(&sr.sample) {
+                        keep.push(sr.sample);
+                    }
+                }
+            }
+        }
+        let samples: Vec<_> = lib
+            .samples
+            .iter()
+            .filter(|s| keep.contains(&s.id))
+            .cloned()
+            .collect();
+        // Prune the asset table to what the kept samples actually reference.
+        let mut out = SampleLibrary {
+            root: Some(p.sample),
+            samples,
+            ..Default::default()
+        };
+        for sample in &out.samples.clone() {
+            if let Some(b) = &sample.bounce {
+                if let Some(a) = lib.assets.buffers.iter().find(|a| a.id == b.asset) {
+                    if !out.assets.buffers.iter().any(|x| x.id == a.id) {
+                        out.assets.buffers.push(a.clone());
+                    }
+                }
+            }
+            for node in &sample.graph.nodes {
+                let buffer = match &node.kind {
+                    NodeKind::AudioBufferSource(b) => b.buffer,
+                    NodeKind::Convolver(c) => c.buffer,
+                    NodeKind::AudioWorklet(w) => {
+                        if let Some(a) = w
+                            .module
+                            .and_then(|m| lib.assets.wasm_modules.iter().find(|x| x.id == m))
+                        {
+                            if !out.assets.wasm_modules.iter().any(|x| x.id == a.id) {
+                                out.assets.wasm_modules.push(a.clone());
+                            }
+                        }
+                        None
+                    }
+                    _ => None,
+                };
+                if let Some(a) = buffer.and_then(|b| lib.assets.buffers.iter().find(|x| x.id == b))
+                {
+                    if !out.assets.buffers.iter().any(|x| x.id == a.id) {
+                        out.assets.buffers.push(a.clone());
+                    }
+                }
+            }
+        }
+        let name = out
+            .samples
+            .iter()
+            .find(|s| s.id == p.sample)
+            .map(|s| s.name.clone())
+            .unwrap_or_else(|| "sample".to_string());
+        let toml_text = toml::to_string_pretty(&out)
+            .map_err(|e| McpError::internal_error(format!("encode TOML: {e}"), None))?;
+        let mut dest = std::path::PathBuf::from(&p.path);
+        if p.path.ends_with('/') || dest.is_dir() {
+            let safe: String = name
+                .chars()
+                .map(|c| if c == '/' || c == '\\' { '_' } else { c })
+                .collect();
+            dest.push(format!("{safe}.toml"));
+        }
+        if let Some(parent) = dest.parent() {
+            if !parent.as_os_str().is_empty() {
+                std::fs::create_dir_all(parent).map_err(|e| {
+                    McpError::internal_error(format!("create {}: {e}", parent.display()), None)
+                })?;
+            }
+        }
+        std::fs::write(&dest, &toml_text).map_err(|e| {
+            McpError::internal_error(format!("write {}: {e}", dest.display()), None)
+        })?;
+        Ok(text(
+            serde_json::json!({
+                "ok": true,
+                "path": dest.display().to_string(),
+                "samples": out.samples.iter().map(|s| s.name.clone()).collect::<Vec<_>>(),
+                "buffers": out.assets.buffers.len(),
+                "wasm_modules": out.assets.wasm_modules.len(),
+            })
+            .to_string(),
+        ))
+    }
+
+    #[tool(
+        description = "Import a patch written by export_sample (a SampleLibrary \
+        TOML): merges its samples and embedded assets into the open project. \
+        Samples whose ids already exist are rejected (import once, then fork \
+        with duplicate_sample). Returns the imported samples."
+    )]
+    async fn import_sample(
+        &self,
+        Parameters(p): Parameters<ImportSampleParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let library_toml = std::fs::read_to_string(&p.path)
+            .map_err(|e| McpError::invalid_params(format!("read {}: {e}", p.path), None))?;
+        match self.req(Request::ImportSamples { library_toml }).await? {
+            Response::Imported(samples) => Ok(text(
+                serde_json::json!({
+                    "ok": true,
+                    "imported": samples
+                        .iter()
+                        .map(|s| serde_json::json!({ "id": s.id, "name": s.name, "kind": s.kind }))
+                        .collect::<Vec<_>>(),
+                })
+                .to_string(),
+            )),
+            Response::Err(e) => Err(McpError::internal_error(e, None)),
+            other => Err(unexpected(other)),
+        }
+    }
+
+    #[tool(
+        description = "Render a Sound/Arrangement offline and write the `.wav` to \
+        a path you choose — the durable form of render_wav (which writes a temp \
+        file). Omit `sample` to export the project root. A directory path gets \
+        `<sample-name>.wav` appended. Returns the written path + stats."
+    )]
+    async fn export_wav(
+        &self,
+        Parameters(p): Parameters<ExportWavParams>,
+    ) -> Result<CallToolResult, McpError> {
+        // Render first (same path as render_wav), then copy the temp file out.
+        let handle = match self
+            .req(Request::RenderWav {
+                sample: p.sample,
+                sample_rate: p.sample_rate,
+                duration_secs: p.duration_secs,
+                trim_silence: p.trim_silence,
+            })
+            .await?
+        {
+            Response::Render(h) => h,
+            Response::Err(e) => return Err(McpError::internal_error(e, None)),
+            other => return Err(unexpected(other)),
+        };
+        let src = crate::http::render_path(&handle.render_id);
+        let mut dest = std::path::PathBuf::from(&p.path);
+        if p.path.ends_with('/') || dest.is_dir() {
+            // Default the filename to the sample's name (or "root").
+            let name = match self.query_result(EditorQuery::Samples).await? {
+                QueryResult::Samples(samples) => samples
+                    .iter()
+                    .find(|s| match p.sample {
+                        Some(id) => s.id == id,
+                        None => s.is_root,
+                    })
+                    .map(|s| s.name.clone())
+                    .unwrap_or_else(|| "root".to_string()),
+                other => return Err(unexpected_query(other)),
+            };
+            // A touch of filename hygiene; keep it permissive.
+            let safe: String = name
+                .chars()
+                .map(|c| if c == '/' || c == '\\' { '_' } else { c })
+                .collect();
+            dest.push(format!("{safe}.wav"));
+        }
+        if let Some(parent) = dest.parent() {
+            if !parent.as_os_str().is_empty() {
+                std::fs::create_dir_all(parent).map_err(|e| {
+                    McpError::internal_error(format!("create {}: {e}", parent.display()), None)
+                })?;
+            }
+        }
+        std::fs::copy(&src, &dest).map_err(|e| {
+            McpError::internal_error(
+                format!("write {} → {}: {e}", src.display(), dest.display()),
+                None,
+            )
+        })?;
+        Ok(text(
+            serde_json::json!({
+                "ok": true,
+                "path": dest.display().to_string(),
+                "byte_len": handle.byte_len,
+                "duration_secs": handle.duration_secs,
+                "peak": handle.peak,
+                "rms": handle.rms,
+            })
+            .to_string(),
+        ))
+    }
+
     #[tool(
         description = "Re-bounce every Sound whose bounce is missing or stale (not \
         clean), in one batch. Renders are async — re-query list_samples / list_assets \
@@ -1327,6 +2151,157 @@ impl EditorMcp {
     )]
     async fn arrangement_track_stats(&self) -> Result<CallToolResult, McpError> {
         self.query(EditorQuery::ArrangementTrackStats).await
+    }
+
+    #[tool(description = "One-call pre-export check of the active arrangement: \
+        combines the bounce report (stale/missing clip sources), per-track solo \
+        peaks/RMS, the master render's stats, the marker window, and clip \
+        overruns (clips extending past the timeline) — plus mechanical \
+        `recommendations` (e.g. 'master peak 1.02 clips: reduce track gains', \
+        'bounce 2 stale sources'). Run it before export_wav / render_wav instead \
+        of stitching arrangement_bounce_report + arrangement_track_stats + \
+        wav_stats yourself.")]
+    async fn verify_arrangement(&self) -> Result<CallToolResult, McpError> {
+        let arr = match self.query_result(EditorQuery::Arrangement).await? {
+            QueryResult::Arrangement(Some(a)) => a,
+            QueryResult::Arrangement(None) => {
+                return Err(McpError::invalid_params(
+                    "active sample is not an arrangement — set_active_sample to one first",
+                    None,
+                ));
+            }
+            other => return Err(unexpected_query(other)),
+        };
+        // The active arrangement's id (the master render targets it).
+        let (arr_id, arr_name) = match self.query_result(EditorQuery::Samples).await? {
+            QueryResult::Samples(samples) => {
+                let active = samples
+                    .iter()
+                    .find(|s| s.is_active)
+                    .ok_or_else(|| McpError::internal_error("no active sample reported", None))?;
+                (active.id, active.name.clone())
+            }
+            other => return Err(unexpected_query(other)),
+        };
+        // Clip source bounce statuses (the bounce-report logic).
+        let assets = match self.query_result(EditorQuery::Assets).await? {
+            QueryResult::Assets(a) => a,
+            other => return Err(unexpected_query(other)),
+        };
+        let (mut stale, mut missing) = (0u32, 0u32);
+        let mut clip_problems: Vec<Value> = Vec::new();
+        for (ti, track) in arr.tracks.iter().enumerate() {
+            for (ci, clip) in track.clips.iter().enumerate() {
+                let bounce = assets
+                    .iter()
+                    .find(|a| a.id == clip.source)
+                    .map(|a| a.bounce.as_str())
+                    .unwrap_or("missing");
+                match bounce {
+                    "clean" => {}
+                    "stale" => {
+                        stale += 1;
+                        clip_problems.push(serde_json::json!({
+                            "track": ti, "clip": ci, "source": clip.source,
+                            "problem": "stale bounce",
+                        }));
+                    }
+                    _ => {
+                        missing += 1;
+                        clip_problems.push(serde_json::json!({
+                            "track": ti, "clip": ci, "source": clip.source,
+                            "problem": "missing bounce",
+                        }));
+                    }
+                }
+                let end = clip.start + clip.length;
+                if end > arr.length_secs + 1e-6 {
+                    clip_problems.push(serde_json::json!({
+                        "track": ti, "clip": ci, "source": clip.source,
+                        "problem": format!(
+                            "overruns the timeline: ends at {end:.3}s, length is {:.3}s",
+                            arr.length_secs
+                        ),
+                    }));
+                }
+            }
+        }
+        // Per-track solo stats + the master render.
+        let track_stats = match self
+            .query_result(EditorQuery::ArrangementTrackStats)
+            .await?
+        {
+            QueryResult::ArrangementTrackStats(t) => t,
+            other => return Err(unexpected_query(other)),
+        };
+        let master = match self
+            .query_result(EditorQuery::WavStats {
+                sample: Some(arr_id),
+                bounced: false,
+                duration_secs: None,
+            })
+            .await?
+        {
+            QueryResult::WavStats(s) => s,
+            other => return Err(unexpected_query(other)),
+        };
+        // Mechanical recommendations — level / bookkeeping facts only.
+        let mut recommendations: Vec<String> = Vec::new();
+        if master.clipping {
+            recommendations.push(format!(
+                "master peak {:.3} clips (>1.0): reduce track gains (set_track_gains)",
+                master.peak
+            ));
+        } else if master.peak > 0.98 {
+            recommendations.push(format!(
+                "master peak {:.3} is within 0.02 of clipping: consider a little headroom",
+                master.peak
+            ));
+        }
+        for t in &track_stats {
+            if t.peak > 1.0 {
+                recommendations.push(format!(
+                    "track {} ({}) clips solo (peak {:.3}): lower its gain or its clips'",
+                    t.track, t.name, t.peak
+                ));
+            }
+        }
+        if stale > 0 {
+            recommendations.push(format!(
+                "{stale} clip(s) play a stale bounce: bounce_all_dirty re-renders them"
+            ));
+        }
+        if missing > 0 {
+            recommendations.push(format!(
+                "{missing} clip(s) have no bounce at all (silent): bounce their sources"
+            ));
+        }
+        if master.dc_offset.abs() > 0.01 {
+            recommendations.push(format!(
+                "master has a DC offset of {:.4}: check for un-zeroed constant sources",
+                master.dc_offset
+            ));
+        }
+        let ok = recommendations.is_empty() && clip_problems.is_empty();
+        Ok(text(
+            serde_json::json!({
+                "ok": ok,
+                "arrangement": {
+                    "id": arr_id,
+                    "name": arr_name,
+                    "bpm": arr.bpm,
+                    "length_secs": arr.length_secs,
+                    "markers": { "start": arr.loop_start, "end": arr.loop_end },
+                    "tracks": arr.tracks.len(),
+                },
+                "master": master,
+                "tracks": track_stats,
+                "clip_problems": clip_problems,
+                "bounce_summary": { "stale": stale, "missing": missing },
+                "recommendations": recommendations,
+            })
+            .to_string(),
+        ))
     }
 
     #[tool(
@@ -1490,14 +2465,19 @@ impl EditorMcp {
             .req(Request::AttachWasm {
                 node,
                 wasm_base64,
-                label,
+                label: label.clone(),
             })
             .await?
         {
             Response::Ok => Ok(text(
                 "ok — params discovered; call get_snapshot to see them",
             )),
-            Response::Err(e) => Err(McpError::internal_error(e, None)),
+            // Carry the node/label context so a failure in a multi-worklet
+            // session names which attach broke (the raw editor error doesn't).
+            Response::Err(e) => Err(McpError::internal_error(
+                format!("attach_wasm '{label}' onto node {node}: {e}"),
+                None,
+            )),
             other => Err(unexpected(other)),
         }
     }
@@ -1609,16 +2589,39 @@ impl EditorMcp {
         }
         let mut refs: std::collections::HashMap<String, String> = std::collections::HashMap::new();
         let mut results: Vec<Value> = Vec::with_capacity(p.commands.len());
-        for (i, mut raw) in p.commands.into_iter().enumerate() {
+        for (i, raw) in p.commands.into_iter().enumerate() {
+            // Tolerate a JSON-*string* element (some clients stringify nested
+            // objects) — parse it to the command object it encodes.
+            let mut raw = match raw {
+                Value::String(s) => serde_json::from_str(&s).map_err(|e| {
+                    schema_error(
+                        format!(
+                            "command {i} was a string that isn't valid JSON ({e}) — \
+                             commands are objects, not strings"
+                        ),
+                        command_example(None),
+                        Value::String(s),
+                    )
+                })?,
+                other => other,
+            };
             // Pull the optional `ref` label off the command object.
             let ref_name = raw
                 .as_object_mut()
                 .and_then(|o| o.remove("ref"))
                 .and_then(|v| v.as_str().map(str::to_string));
-            // Substitute `$name` → captured id anywhere in the command.
+            // Substitute `$name` → captured id anywhere in the command, and
+            // resolve a bare kind tag in an add_node's args.
             substitute_refs(&mut raw, &refs);
-            let cmd: EditorCommand = serde_json::from_value(raw)
-                .map_err(|e| McpError::invalid_params(format!("command {i}: {e}"), None))?;
+            let raw = normalize_command_value(raw);
+            let cmd_name = raw.get("cmd").and_then(Value::as_str).map(str::to_string);
+            let cmd: EditorCommand = serde_json::from_value(raw.clone()).map_err(|e| {
+                schema_error(
+                    format!("command {i}: {e}"),
+                    command_example(cmd_name.as_deref()),
+                    raw,
+                )
+            })?;
             let id = self.dispatch_created(cmd).await?;
             if let (Some(name), Some(id)) = (&ref_name, &id) {
                 refs.insert(name.clone(), id.clone());
@@ -1628,6 +2631,74 @@ impl EditorMcp {
         Ok(text(
             serde_json::json!({ "refs": refs, "results": results }).to_string(),
         ))
+    }
+
+    #[tool(
+        description = "Validate command payloads WITHOUT dispatching them — a \
+        dry-run for dispatch_command / dispatch_batch / dispatch_refs. Returns, \
+        per command, either its normalized canonical JSON (what the editor would \
+        receive, with bare kind tags expanded) or a structured error with a \
+        copy-pasteable `expected` example. `\"$ref\"` placeholders are accepted \
+        (substituted with a nil id for validation only). Use this to check a \
+        batch's shapes in one call instead of discovering errors one field at a \
+        time against the live document."
+    )]
+    async fn validate_command(
+        &self,
+        Parameters(p): Parameters<ValidateParams>,
+    ) -> Result<CallToolResult, McpError> {
+        if p.commands.is_empty() {
+            return Err(McpError::invalid_params("commands must be non-empty", None));
+        }
+        // `$ref` placeholders resolve to a nil id, purely so the typed decode can
+        // proceed — validation checks shapes, not document state.
+        let nil_refs: std::collections::HashMap<String, String> = p
+            .commands
+            .iter()
+            .filter_map(|c| c.get("ref").and_then(Value::as_str))
+            .map(|r| {
+                (
+                    r.to_string(),
+                    "00000000-0000-0000-0000-000000000000".to_string(),
+                )
+            })
+            .collect();
+        let mut results: Vec<Value> = Vec::with_capacity(p.commands.len());
+        for (i, raw) in p.commands.into_iter().enumerate() {
+            let mut raw = match raw {
+                Value::String(s) => match serde_json::from_str(&s) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        results.push(serde_json::json!({
+                            "index": i, "ok": false,
+                            "error": format!("a string element must be JSON-encoded ({e}) — commands are objects"),
+                            "expected": command_example(None),
+                        }));
+                        continue;
+                    }
+                },
+                other => other,
+            };
+            if let Some(o) = raw.as_object_mut() {
+                o.remove("ref");
+            }
+            substitute_refs(&mut raw, &nil_refs);
+            let raw = normalize_command_value(raw);
+            let cmd_name = raw.get("cmd").and_then(Value::as_str).map(str::to_string);
+            match serde_json::from_value::<EditorCommand>(raw) {
+                Ok(cmd) => results.push(serde_json::json!({
+                    "index": i, "ok": true,
+                    "normalized": serde_json::to_value(&cmd).unwrap_or(Value::Null),
+                })),
+                Err(e) => results.push(serde_json::json!({
+                    "index": i, "ok": false,
+                    "error": e.to_string(),
+                    "expected": command_example(cmd_name.as_deref()),
+                    "docs_uri": "awsm-audio://docs/vocabulary",
+                })),
+            }
+        }
+        Ok(text(serde_json::json!({ "results": results }).to_string()))
     }
 
     #[tool(
@@ -1975,10 +3046,12 @@ impl ServerHandler for EditorMcp {
         _ctx: RequestContext<RoleServer>,
     ) -> Result<ReadResourceResult, McpError> {
         let body = match req.uri.as_str() {
-            "awsm-audio://docs/vocabulary" => VOCABULARY_DOC,
-            "awsm-audio://docs/worklet-abi" => WORKLET_ABI_DOC,
-            "awsm-audio://docs/track-workflow" => TRACK_WORKFLOW_DOC,
-            "awsm-audio://docs/instruments" => INSTRUMENTS_DOC,
+            // The vocabulary carries a generated index derived from the same
+            // serde/schemars types the server validates against (no drift).
+            "awsm-audio://docs/vocabulary" => vocabulary_doc(),
+            "awsm-audio://docs/worklet-abi" => WORKLET_ABI_DOC.to_string(),
+            "awsm-audio://docs/track-workflow" => TRACK_WORKFLOW_DOC.to_string(),
+            "awsm-audio://docs/instruments" => INSTRUMENTS_DOC.to_string(),
             other => {
                 return Err(McpError::resource_not_found(
                     format!("unknown resource {other}"),
@@ -2026,6 +3099,83 @@ impl ServerHandler for EditorMcp {
 /// The command/query JSON-shape reference served as `awsm-audio://docs/vocabulary`. It
 /// pins the serde tagging the escape hatches (`dispatch_command` / `run_query`)
 /// expect, so an agent isn't guessing at `cmd`/`args`/`op` nesting.
+/// The vocabulary resource body: the curated guide plus an index **generated
+/// from the same serde/schemars types the server validates against** — the tag
+/// lists below can never drift from the code (the prose examples are pinned by
+/// the decode tests in [`tests`]).
+fn vocabulary_doc() -> String {
+    let section =
+        |title: &str, tags: Vec<String>| format!("\n### {title}\n\n    {}\n", tags.join(", "));
+    let mut out = String::from(VOCABULARY_DOC);
+    out.push_str("\n## Generated index (derived from the live schema)\n");
+    out.push_str(&section(
+        "Node kind tags (`add_node` / `add_chain` kind)",
+        NodeKind::all_tags().iter().map(|s| s.to_string()).collect(),
+    ));
+    out.push_str(&section(
+        "EditorCommand `cmd` tags (dispatch_command / dispatch_batch / dispatch_refs)",
+        enum_tags::<EditorCommand>("cmd"),
+    ));
+    out.push_str(&section(
+        "EditorQuery `query` tags (run_query)",
+        enum_tags::<EditorQuery>("query"),
+    ));
+    out.push_str(&section(
+        "ArrangeOp `op` tags (edit_arrange)",
+        enum_tags::<ArrangeOp>("op"),
+    ));
+    out.push_str(&section(
+        "SongOp `op` tags (edit_song)",
+        enum_tags::<awsm_audio_editor_protocol::SongOp>("op"),
+    ));
+    out.push_str(&section(
+        "ControlOp `op` tags (edit_control)",
+        enum_tags::<awsm_audio_editor_protocol::ControlOp>("op"),
+    ));
+    out.push_str(&section(
+        "AutomationEvent `event` tags (set_automation)",
+        enum_tags::<AutomationEvent>("event"),
+    ));
+    out
+}
+
+/// Every tag value an adjacently-tagged enum accepts in its `tag_field`,
+/// extracted from the schemars JSON Schema (each variant subschema carries the
+/// tag as a `const` or single-value `enum` on that property).
+fn enum_tags<T: schemars::JsonSchema>(tag_field: &str) -> Vec<String> {
+    let schema = schemars::schema_for!(T);
+    let v = serde_json::to_value(&schema).unwrap_or_default();
+    let mut tags = std::collections::BTreeSet::new();
+    collect_tag_values(&v, tag_field, &mut tags);
+    tags.into_iter().collect()
+}
+
+fn collect_tag_values(v: &Value, field: &str, out: &mut std::collections::BTreeSet<String>) {
+    match v {
+        Value::Object(o) => {
+            if let Some(tag) = o.get("properties").and_then(|p| p.get(field)) {
+                if let Some(c) = tag.get("const").and_then(Value::as_str) {
+                    out.insert(c.to_string());
+                }
+                if let Some(e) = tag.get("enum").and_then(Value::as_array) {
+                    for s in e.iter().filter_map(Value::as_str) {
+                        out.insert(s.to_string());
+                    }
+                }
+            }
+            for val in o.values() {
+                collect_tag_values(val, field, out);
+            }
+        }
+        Value::Array(a) => {
+            for val in a {
+                collect_tag_values(val, field, out);
+            }
+        }
+        _ => {}
+    }
+}
+
 const VOCABULARY_DOC: &str = r#"# awsm-audio command/query vocabulary
 
 Most graph building is covered by the typed tools (add_node, connect, set_field,
@@ -2043,7 +3193,7 @@ Their JSON is serde-tagged — the shapes below are exact.
 
 ## Node kinds (for add_node)
 
-`add_node` accepts either a kind-name string (defaults filled in):
+`add_node` accepts either a bare kind-name string (defaults filled in):
 
     { "kind": "oscillator", "x": 0, "y": 0 }
 
@@ -2053,7 +3203,12 @@ or a full value (copy a kind's `example` from list_node_kinds):
       "frequency":{"value":1000.0},"q":{"value":1.0},"gain":{"value":0.0},
       "detune":{"value":0.0}}}, "x": 0, "y": 0 }
 
-A NodeKind value is adjacently tagged: `{"kind":"<tag>","props":{…}}`.
+A NodeKind value is adjacently tagged: `{"kind":"<tag>","props":{…}}`. Bare
+kind tags work everywhere a NodeKind is accepted — add_node, add_chain, and an
+`add_node` command's `args.kind` inside dispatch_command / dispatch_batch /
+dispatch_refs. (`"sample"` is the one exception: a sample-ref needs a target id,
+so use `add_sample_ref`.) Unsure a batch is shaped right? `validate_command`
+dry-runs the exact payload without mutating anything.
 
 ## EditorCommand (dispatch_command)
 
@@ -2066,6 +3221,32 @@ Adjacently tagged by `cmd`/`args`. Examples:
 `set_field`'s `value` is a FieldValue: `{"t":"num","v":1.0}`, `{"t":"text","v":"x"}`,
 or `{"t":"bool","v":true}`. (The set_field *tool* takes a plain number; use this
 form only via dispatch_command for text/bool fields.)
+
+### Boundaries (add_boundary) and automation (set_automation)
+
+Both have dedicated typed tools — prefer them. The raw command shapes, exact:
+
+    {"cmd":"add_boundary","args":{"port":"outlet","x":0.0,"y":0.0}}   // port: "inlet" | "outlet"
+
+    {"cmd":"set_automation","args":{"id":"<node>","param":"gain","events":[
+       {"event":"set_value","args":{"value":0.0,"time":0.0}},
+       {"event":"linear_ramp","args":{"value":1.0,"time":0.01}},
+       {"event":"exponential_ramp","args":{"value":0.001,"time":0.4}}
+    ]}}
+
+An AutomationEvent is adjacently tagged `{"event":"<name>","args":{…}}`. The
+names + args mirror the AudioParam scheduling methods one-to-one:
+
+    set_value         {"value":1.0,"time":0.0}
+    linear_ramp       {"value":1.0,"time":0.5}
+    exponential_ramp  {"value":0.001,"time":0.5}      // value must be > 0
+    set_target        {"target":0.5,"start_time":0.2,"time_constant":0.05}
+    set_value_curve   {"values":[0.0,1.0,0.0],"start_time":0.0,"duration":1.0}
+    cancel_scheduled  {"time":1.0}
+    cancel_and_hold   {"time":1.0}
+
+`events` REPLACES the param's whole timeline. Times are seconds — from note-on
+for a triggered instrument voice, from render start otherwise.
 
 ### Sequencer + arrangement sub-ops
 
@@ -2131,15 +3312,32 @@ Adjacently tagged by `query`/`args`. Unit variants need no args:
 
 ## Typical flow
 
-1. list_node_kinds → pick kinds.
+1. list_node_kinds → pick kinds. (pairing_status first if you're unsure an
+   editor is attached.)
 2. add_node (source) + add_node (effects); connect them; the last unconnected
    output auditions to master.
-3. set_field to shape it; render_wav / wav_stats / waveform to inspect.
-4. bounce a Sound, then build an Arrangement (add_sample arrangement →
-   edit_arrange add_track / add_clip). render_wav / wav_stats / waveform work on
+3. set_field / set_automation to shape it; render_wav / wav_stats / waveform to
+   inspect (wav_stats also reports crest factor, DC offset, lead/trail silence,
+   approximate attack/decay — useful for one-shots and sound effects).
+4. bounce a Sound, then build an Arrangement (create_arrangement takes bpm /
+   length_secs / named tracks in one call; add_arrangement_tracks +
+   set_track_gains batch later edits). render_wav / wav_stats / waveform work on
    an arrangement sample too — they render its clip timeline. Optionally set
    loop/export markers (set_arrangement_markers, or edit_arrange set_markers) to
    render just a region; clear them to render the whole timeline.
+5. verify_arrangement before exporting — one call combining the bounce report,
+   per-track solo stats, master stats, and clip overruns, with mechanical
+   recommendations. Then export_wav writes the `.wav` to a path you choose
+   (`trim_silence: true` strips lead/tail silence below -60 dBFS).
+6. Forking experiments: duplicate_sample clones a patch; compare_samples renders
+   two and returns stats side by side; parameter_sweep measures one field across
+   several values (non-destructive); set_sample_notes tags variants ("keeper",
+   "too bright"). export_sample / import_sample move a patch (sample +
+   sub-samples + assets) between projects as a self-contained TOML.
+7. Discovery extras: list_modulation_targets maps every automatable param on the
+   active canvas; set_arrangement_sections names timeline regions ("intro",
+   "main") as metadata; the generated index below lists every tag the escape
+   hatches accept.
 
 ## Multi-sample: an instrument played by a sequencer
 
@@ -2457,6 +3655,61 @@ fn unexpected(resp: Response) -> McpError {
     McpError::internal_error(format!("unexpected response: {resp:?}"), None)
 }
 
+/// An invalid-params error whose `data` is agent-actionable in one retry: the
+/// `problem`, a copy-pasteable `expected` payload, the `received` value, and the
+/// `docs_uri` to read — instead of a bare serde message that only reveals the
+/// next missing field.
+fn schema_error(problem: impl Into<String>, expected: Value, received: Value) -> McpError {
+    let problem = problem.into();
+    McpError::invalid_params(
+        problem.clone(),
+        Some(serde_json::json!({
+            "problem": problem,
+            "expected": expected,
+            "received": received,
+            "docs_uri": "awsm-audio://docs/vocabulary",
+        })),
+    )
+}
+
+/// A minimal **valid** payload for a command (by its `cmd` tag), for the
+/// `expected` slot of [`schema_error`] — mechanical shapes only, no musical
+/// content. Unknown/omitted tags get a generic add_node + connect pair.
+fn command_example(cmd: Option<&str>) -> Value {
+    match cmd {
+        Some("add_node") => serde_json::json!(
+            {"cmd":"add_node","args":{"kind":"oscillator","x":0.0,"y":0.0}}
+        ),
+        Some("add_boundary") => serde_json::json!(
+            {"cmd":"add_boundary","args":{"port":"outlet","x":0.0,"y":0.0}}
+        ),
+        Some("set_automation") => serde_json::json!(
+            {"cmd":"set_automation","args":{"id":"<node-id>","param":"gain","events":[
+                {"event":"set_value","args":{"value":0.0,"time":0.0}},
+                {"event":"linear_ramp","args":{"value":1.0,"time":0.1}}
+            ]}}
+        ),
+        Some("set_field") => serde_json::json!(
+            {"cmd":"set_field","args":{"id":"<node-id>","key":"frequency","value":{"t":"num","v":440.0}}}
+        ),
+        Some("connect") => serde_json::json!(
+            {"cmd":"connect","args":{"from":"<node-id>","to":"<node-id>"}}
+        ),
+        Some("edit_song") => serde_json::json!(
+            {"cmd":"edit_song","args":{"node":"<seq-id>","op":{"op":"add_note","args":{
+                "track":0,"event":{"start":0.0,"length":1.0,"note":60,"velocity":100}}}}}
+        ),
+        Some("edit_arrange") => serde_json::json!(
+            {"cmd":"edit_arrange","args":{"op":{"op":"add_track"}}}
+        ),
+        _ => serde_json::json!([
+            {"cmd":"add_node","ref":"osc","args":{"kind":"oscillator","x":0.0,"y":0.0}},
+            {"cmd":"add_node","ref":"out","args":{"kind":"output","x":200.0,"y":0.0}},
+            {"cmd":"connect","args":{"from":"$osc","to":"$out"}}
+        ]),
+    }
+}
+
 /// Drop the bulky embedded note_sequencer song events from a snapshot value
 /// (the `detail:"ids"` mode): replaces each sequencer track's `events` array with
 /// an empty one plus an `events_count`, leaving node ids/kinds/wires intact.
@@ -2710,17 +3963,115 @@ impl Processor for {struct_name} {{
 
 /// A tool argument that is **strongly typed** — its JSON Schema is exactly `T`'s,
 /// so a fresh agent sees the precise shape — yet tolerant of clients that deliver
-/// a nested object as a JSON *string* (it deserializes from either form). Typed,
-/// self-documenting, and robust.
+/// a nested object as a JSON *string* (it deserializes from either form), and of
+/// bare-name strings where `T` supports them (a catalog kind tag for `NodeKind`).
+/// Typed, self-documenting, and robust.
 #[derive(Debug, Clone)]
 pub struct Flexible<T>(pub T);
 
-impl<'de, T: serde::de::DeserializeOwned> serde::Deserialize<'de> for Flexible<T> {
+/// Construct a `T` from a bare (non-JSON) name token, where that's meaningful.
+/// The default is "not supported"; `NodeKind` resolves catalog tags like
+/// `"oscillator"` to a default-props kind. This is what makes
+/// `add_node {kind: "gain"}` / `add_chain {kinds: ["oscillator", …]}` work —
+/// previously a bare tag fell into the JSON-string parse and died with the
+/// opaque `expected value at line 1 column 1`.
+pub trait FromBareName: Sized {
+    fn from_bare_name(_name: &str) -> Option<Self> {
+        None
+    }
+    /// A hint appended to decode errors (e.g. the accepted tag list).
+    fn bare_name_hint() -> Option<String> {
+        None
+    }
+    /// Pre-normalize a raw JSON value before the typed decode — e.g. resolve a
+    /// bare kind tag nested inside a command (`add_node`'s `args.kind`).
+    fn normalize_value(v: Value) -> Value {
+        v
+    }
+}
+
+/// Resolve a bare kind tag nested in a command's `args.kind` (the `add_node`
+/// case) to its full default `NodeKind` value, so bare tags work through the
+/// dispatch_command / dispatch_batch / dispatch_refs escape hatches too — not
+/// just the typed add_node / add_chain tools.
+fn normalize_command_value(mut v: Value) -> Value {
+    let is_add_node = v.get("cmd").and_then(Value::as_str) == Some("add_node");
+    if is_add_node {
+        if let Some(kind_slot) = v.pointer_mut("/args/kind") {
+            if let Some(tag) = kind_slot.as_str() {
+                if let Some(kind) = NodeKind::from_tag(tag.trim()) {
+                    if let Ok(full) = serde_json::to_value(&kind) {
+                        *kind_slot = full;
+                    }
+                }
+            }
+        }
+    }
+    v
+}
+
+impl FromBareName for NodeKind {
+    fn from_bare_name(name: &str) -> Option<Self> {
+        NodeKind::from_tag(name)
+    }
+    fn bare_name_hint() -> Option<String> {
+        Some(format!(
+            "accepted bare kind tags: {}; or pass a full {{\"kind\":\"<tag>\",\"props\":{{…}}}} \
+             value (copy an `example` from list_node_kinds)",
+            NodeKind::all_tags().join(", ")
+        ))
+    }
+}
+impl FromBareName for EditorCommand {
+    fn bare_name_hint() -> Option<String> {
+        Some(
+            "a command is an object {\"cmd\":\"<name>\",\"args\":{…}} — \
+             read awsm-audio://docs/vocabulary for every shape"
+                .to_string(),
+        )
+    }
+    fn normalize_value(v: Value) -> Value {
+        normalize_command_value(v)
+    }
+}
+impl FromBareName for EditorQuery {
+    fn bare_name_hint() -> Option<String> {
+        Some(
+            "a query is an object {\"query\":\"<name>\"} or {\"query\":\"<name>\",\"args\":{…}}"
+                .to_string(),
+        )
+    }
+}
+
+impl<'de, T: serde::de::DeserializeOwned + FromBareName> serde::Deserialize<'de> for Flexible<T> {
     fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
         use serde::de::Error;
         let inner = match Value::deserialize(d)? {
-            Value::String(s) => serde_json::from_str(&s).map_err(Error::custom)?,
-            other => serde_json::from_value(other).map_err(Error::custom)?,
+            Value::String(s) => {
+                // A bare name first (e.g. a kind tag), then a JSON-encoded payload.
+                if let Some(v) = T::from_bare_name(s.trim()) {
+                    v
+                } else {
+                    let payload: Value = serde_json::from_str(&s).map_err(|e| {
+                        Error::custom(match T::bare_name_hint() {
+                            Some(hint) => format!("string {s:?} is not valid here ({e}) — {hint}"),
+                            None => e.to_string(),
+                        })
+                    })?;
+                    serde_json::from_value(T::normalize_value(payload)).map_err(|e| {
+                        Error::custom(match T::bare_name_hint() {
+                            Some(hint) => format!("{e} — {hint}"),
+                            None => e.to_string(),
+                        })
+                    })?
+                }
+            }
+            other => serde_json::from_value(T::normalize_value(other)).map_err(|e| {
+                Error::custom(match T::bare_name_hint() {
+                    Some(hint) => format!("{e} — {hint}"),
+                    None => e.to_string(),
+                })
+            })?,
         };
         Ok(Flexible(inner))
     }
@@ -2736,5 +4087,177 @@ impl<T: schemars::JsonSchema> schemars::JsonSchema for Flexible<T> {
     }
     fn json_schema(generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
         T::json_schema(generator)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! Regressions for the agent-experience failures captured in the field notes
+    //! (schema-exploration loops): bare kind tags, stringified dispatch_refs
+    //! commands, add_boundary / set_automation shapes, and the guarantee that
+    //! every `expected` example we hand back in an error actually decodes.
+
+    use super::*;
+
+    fn flexible_kind(v: Value) -> Result<NodeKind, String> {
+        serde_json::from_value::<Flexible<NodeKind>>(v)
+            .map(|f| f.0)
+            .map_err(|e| e.to_string())
+    }
+
+    #[test]
+    fn bare_kind_tags_decode_for_every_catalog_kind() {
+        // The exact failures from the logs: "audio_buffer_source" and "output"
+        // as bare strings died with `expected value at line 1 column 1`.
+        for tag in NodeKind::all_tags() {
+            let kind = flexible_kind(Value::String((*tag).to_string()))
+                .unwrap_or_else(|e| panic!("bare tag {tag:?} failed: {e}"));
+            let v = serde_json::to_value(&kind).unwrap();
+            assert_eq!(v.get("kind").and_then(Value::as_str), Some(*tag));
+        }
+    }
+
+    #[test]
+    fn unknown_bare_kind_names_the_accepted_tags() {
+        let err = flexible_kind(Value::String("wibble".into())).unwrap_err();
+        assert!(
+            err.contains("oscillator") && err.contains("list_node_kinds"),
+            "error should teach recovery, got: {err}"
+        );
+    }
+
+    #[test]
+    fn full_kind_objects_still_decode() {
+        let full = serde_json::json!({"kind":"gain","props":{"gain":{"value":0.5}}});
+        let kind = flexible_kind(full).unwrap();
+        assert!(matches!(kind, NodeKind::Gain(_)));
+    }
+
+    #[test]
+    fn add_node_command_accepts_bare_kind_tag() {
+        // Through the dispatch_command escape hatch (Flexible<EditorCommand>).
+        let cmd: Flexible<EditorCommand> = serde_json::from_value(serde_json::json!(
+            {"cmd":"add_node","args":{"kind":"oscillator","x":1.0,"y":2.0}}
+        ))
+        .expect("bare kind tag inside add_node args");
+        assert!(matches!(cmd.0, EditorCommand::AddNode { .. }));
+    }
+
+    #[test]
+    fn every_command_example_is_itself_valid() {
+        // The `expected` payloads we return in schema errors must decode — an
+        // example an agent can't paste back is worse than none.
+        // Examples carry human-readable `<node-id>`-style placeholders where a
+        // real id goes; swap them for a nil uuid before the decode check.
+        fn fill_placeholders(v: &mut Value) {
+            match v {
+                Value::String(s) if s.starts_with('<') && s.ends_with('>') => {
+                    *s = "00000000-0000-0000-0000-000000000000".to_string();
+                }
+                Value::Array(a) => a.iter_mut().for_each(fill_placeholders),
+                Value::Object(o) => o.values_mut().for_each(fill_placeholders),
+                _ => {}
+            }
+        }
+        for cmd in [
+            "add_node",
+            "add_boundary",
+            "set_automation",
+            "set_field",
+            "connect",
+            "edit_song",
+            "edit_arrange",
+        ] {
+            let mut ex = normalize_command_value(command_example(Some(cmd)));
+            fill_placeholders(&mut ex);
+            serde_json::from_value::<EditorCommand>(ex.clone())
+                .unwrap_or_else(|e| panic!("example for {cmd} does not decode: {e}\n{ex}"));
+        }
+        // The generic example is a dispatch_refs batch — each element must decode
+        // once its `ref` label is dropped and `$refs` are substituted.
+        let Value::Array(batch) = command_example(None) else {
+            panic!("generic example should be a batch");
+        };
+        let refs: std::collections::HashMap<String, String> = batch
+            .iter()
+            .filter_map(|c| c.get("ref").and_then(Value::as_str))
+            .map(|r| {
+                (
+                    r.to_string(),
+                    "00000000-0000-0000-0000-000000000000".to_string(),
+                )
+            })
+            .collect();
+        for mut item in batch {
+            if let Some(o) = item.as_object_mut() {
+                o.remove("ref");
+            }
+            substitute_refs(&mut item, &refs);
+            let item = normalize_command_value(item);
+            serde_json::from_value::<EditorCommand>(item.clone())
+                .unwrap_or_else(|e| panic!("generic example element does not decode: {e}\n{item}"));
+        }
+    }
+
+    #[test]
+    fn set_automation_event_shape_decodes() {
+        // The worst agentic loop in the field notes: four retries, each error
+        // revealing one more field, never the full shape. Lock the full shape.
+        let events: Vec<AutomationEvent> = serde_json::from_value(serde_json::json!([
+            {"event":"set_value","args":{"value":0.0,"time":0.0}},
+            {"event":"linear_ramp","args":{"value":1.0,"time":0.01}},
+            {"event":"exponential_ramp","args":{"value":0.001,"time":0.4}},
+            {"event":"set_target","args":{"target":0.5,"start_time":0.2,"time_constant":0.05}},
+            {"event":"cancel_scheduled","args":{"time":1.0}}
+        ]))
+        .expect("documented automation event shapes decode");
+        assert_eq!(events.len(), 5);
+    }
+
+    #[test]
+    fn generated_vocabulary_index_tracks_the_schema() {
+        // The generated index must list every escape-hatch tag — including the
+        // ones this change-set added — straight from the schemars schemas.
+        let doc = vocabulary_doc();
+        for needle in [
+            "add_node",
+            "set_automation",
+            "add_boundary",
+            "set_sample_notes",
+            "set_sections",
+            "modulation_targets",
+            "set_value_curve",
+            "oscillator",
+        ] {
+            assert!(doc.contains(needle), "vocabulary index missing {needle}");
+        }
+    }
+
+    #[test]
+    fn new_command_shapes_decode() {
+        // set_sample_notes + edit_arrange set_sections (this change-set's new
+        // escape-hatch shapes).
+        let cmd: EditorCommand = serde_json::from_value(serde_json::json!(
+            {"cmd":"set_sample_notes","args":{
+                "id":"00000000-0000-0000-0000-000000000000","notes":"keeper"}}
+        ))
+        .expect("set_sample_notes decodes");
+        assert!(matches!(cmd, EditorCommand::SetSampleNotes { .. }));
+        let cmd: EditorCommand = serde_json::from_value(serde_json::json!(
+            {"cmd":"edit_arrange","args":{"op":{"op":"set_sections","args":{
+                "sections":[{"name":"intro","start":0.0,"end":8.0}]}}}}
+        ))
+        .expect("set_sections decodes");
+        assert!(matches!(cmd, EditorCommand::EditArrange { .. }));
+    }
+
+    #[test]
+    fn add_boundary_command_shape_decodes() {
+        // `command 2: missing field port` — lock the corrected shape.
+        let cmd: EditorCommand = serde_json::from_value(serde_json::json!(
+            {"cmd":"add_boundary","args":{"port":"outlet","x":0.0,"y":0.0}}
+        ))
+        .expect("add_boundary with `port` decodes");
+        assert!(matches!(cmd, EditorCommand::AddBoundary { .. }));
     }
 }
