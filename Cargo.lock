@@ -101,7 +101,7 @@ checksum = "f2032f911046de80f0a198e0901378627c33f59ea0ac00e363d481118bd70a53"
 
 [[package]]
 name = "awsm-audio-editor"
-version = "1.5.0"
+version = "1.6.0"
 dependencies = [
  "anyhow",
  "awsm-audio-editor-protocol",
@@ -129,7 +129,7 @@ dependencies = [
 
 [[package]]
 name = "awsm-audio-editor-protocol"
-version = "1.5.0"
+version = "1.6.0"
 dependencies = [
  "awsm-audio-schema",
  "schemars",
@@ -141,7 +141,7 @@ dependencies = [
 
 [[package]]
 name = "awsm-audio-example"
-version = "1.5.0"
+version = "1.6.0"
 dependencies = [
  "anyhow",
  "awsm-audio-player",
@@ -159,7 +159,7 @@ dependencies = [
 
 [[package]]
 name = "awsm-audio-mcp"
-version = "1.5.0"
+version = "1.6.0"
 dependencies = [
  "anyhow",
  "awsm-audio-editor-protocol",
@@ -181,7 +181,7 @@ dependencies = [
 
 [[package]]
 name = "awsm-audio-player"
-version = "1.5.0"
+version = "1.6.0"
 dependencies = [
  "anyhow",
  "awsm-audio-schema",
@@ -198,7 +198,7 @@ dependencies = [
 
 [[package]]
 name = "awsm-audio-schema"
-version = "1.5.0"
+version = "1.6.0"
 dependencies = [
  "base64",
  "midly",
@@ -211,32 +211,32 @@ dependencies = [
 
 [[package]]
 name = "awsm-audio-worklet"
-version = "1.5.0"
+version = "1.6.0"
 
 [[package]]
 name = "awsm-audio-worklet-bitcrusher"
-version = "1.5.0"
+version = "1.6.0"
 dependencies = [
  "awsm-audio-worklet",
 ]
 
 [[package]]
 name = "awsm-audio-worklet-drive"
-version = "1.5.0"
+version = "1.6.0"
 dependencies = [
  "awsm-audio-worklet",
 ]
 
 [[package]]
 name = "awsm-audio-worklet-gain"
-version = "1.5.0"
+version = "1.6.0"
 dependencies = [
  "awsm-audio-worklet",
 ]
 
 [[package]]
 name = "awsm-audio-worklet-ringmod"
-version = "1.5.0"
+version = "1.6.0"
 dependencies = [
  "awsm-audio-worklet",
 ]
