@@ -5,7 +5,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use awsm_audio_schema::{Arrangement, NodeId, NodeKind, SampleId, SampleKind};
+use awsm_audio_schema::{Arrangement, AutomationEvent, NodeId, NodeKind, SampleId, SampleKind};
 
 use crate::snapshot::{EditorProject, EditorSnapshot};
 
@@ -139,6 +139,16 @@ pub struct FieldInfo {
     pub options: Vec<String>,
     /// True if a signal can be wired to this field (a modulation inlet).
     pub modulatable: bool,
+    /// Automation timeline on this field's WebAudio AudioParam, if any. When
+    /// **non-empty**, the *rendered* value is driven by this timeline (event
+    /// times are seconds from note-on for a triggered voice, else from render
+    /// start) and `value_num` is only the pre-automation base value — so a base
+    /// that looks "unchanged" (e.g. filter freq 350, gain 1.0) is not the
+    /// effective value here. This is the effective-value readback asked for in
+    /// `docs/plans/mcp-improvements.md` #1/#7: `set_automation` writes here,
+    /// `set_field` writes `value_num`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub automation: Vec<AutomationEvent>,
 }
 
 /// A creatable node kind, surfaced for discovery so an agent can `add_node`

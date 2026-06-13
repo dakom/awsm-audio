@@ -223,6 +223,7 @@ fn catalog_and_node_fields_round_trip() {
                 value_text: Some("sine".into()),
                 options: vec!["sine".into(), "square".into()],
                 modulatable: false,
+                automation: vec![],
             },
             FieldInfo {
                 key: "frequency".into(),
@@ -232,6 +233,7 @@ fn catalog_and_node_fields_round_trip() {
                 value_text: None,
                 options: vec![],
                 modulatable: true,
+                automation: vec![],
             },
         ],
     }]);

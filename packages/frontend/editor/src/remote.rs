@@ -472,24 +472,31 @@ fn dispatch(req: Request) -> Response {
     let ctrl = controller();
     match req {
         Request::Dispatch(cmd) => {
-            ctrl.dispatch(cmd);
-            // Echo a minted id (node / sample / boundary / sample-ref) so the
-            // caller doesn't need a follow-up snapshot to learn it.
-            match ctrl.take_created_id() {
-                Some(id) => Response::Created { id },
-                None => Response::Ok,
+            // `dispatch_remote` acts by node id regardless of the active canvas and
+            // returns an error (rather than a silent `ok`) for a node that lives in
+            // no sample — see `EditorController::dispatch_remote`.
+            match ctrl.dispatch_remote(cmd) {
+                // Echo a minted id (node / sample / boundary / sample-ref) so the
+                // caller doesn't need a follow-up snapshot to learn it.
+                Ok(Some(id)) => Response::Created { id },
+                Ok(None) => Response::Ok,
+                Err(e) => Response::Err(e),
             }
         }
         Request::DispatchBatch(cmds) => {
             let items = cmds
                 .into_iter()
-                .map(|c| {
-                    ctrl.dispatch(c);
-                    BatchItemResult {
+                .map(|c| match ctrl.dispatch_remote(c) {
+                    Ok(id) => BatchItemResult {
                         ok: true,
-                        id: ctrl.take_created_id(),
+                        id,
                         error: None,
-                    }
+                    },
+                    Err(e) => BatchItemResult {
+                        ok: false,
+                        id: None,
+                        error: Some(e),
+                    },
                 })
                 .collect();
             Response::Batch(items)

@@ -870,8 +870,12 @@ impl EditorMcp {
         only — call list_samples to see every sample and switch with \
         set_active_sample. Each connection carries a stable `id` you can pass to \
         the `disconnect` command to remove that one wire without touching its \
-        endpoint nodes. Pass `detail:\"ids\"` to omit the large embedded sequencer \
-        song events (keeps node ids/kinds/wires + per-track note counts) on later \
+        endpoint nodes. Each AudioParam shows its base `value` plus an \
+        `automation` array (present only when set) — when that array is non-empty \
+        the timeline, not the base `value`, is the effective rendered value, so \
+        don't read a bare param value as authoritative. Pass `detail:\"ids\"` to \
+        omit the large embedded sequencer song events (keeps node ids/kinds/wires \
+        + per-track note counts, and keeps each param's automation) on later \
         round-trips."
     )]
     async fn get_snapshot(
@@ -900,9 +904,13 @@ impl EditorMcp {
     }
 
     #[tool(description = "The editable fields of one live node: each `key` (for \
-        set_field), control type, current value, choice options, and whether it's \
-        modulation-targetable. Use this to discover a node's set_field keys \
-        (including a worklet's discovered params).")]
+        set_field), control type, current value, choice options, whether it's \
+        modulation-targetable, and any AudioParam `automation` timeline. Use this \
+        to discover a node's set_field keys (including a worklet's discovered \
+        params). When a field's `automation` array is non-empty the rendered value \
+        is driven by that timeline (not the base `value_num`) — this is the \
+        effective-value readback. Resolves by node id across all samples, not just \
+        the active canvas.")]
     async fn get_node_fields(
         &self,
         Parameters(p): Parameters<NodeArg>,
@@ -1204,7 +1212,16 @@ impl EditorMcp {
     #[tool(
         description = "Set a node setting (the SetField command). `value` may be \
         a number (most fields), a string (a choice/text field like an oscillator \
-        `type`), or a bool — the field type is inferred from the JSON value."
+        `type`), or a bool — the field type is inferred from the JSON value. \
+        For an AudioParam field (gain, filter frequency/Q/detune/gain, oscillator \
+        frequency/detune, delay_time, worklet params, output gain) this sets the \
+        param's BASE value; if that param also has a `set_automation` timeline, \
+        the timeline drives the rendered value and this base only applies before \
+        the first event (read it back with get_node_fields `automation`). Note for \
+        a sequencer-triggered voice the played note overrides an oscillator's \
+        `frequency` (see docs/instruments). Acts by node id regardless of which \
+        sample is the active canvas, and errors (never a silent ok) if the node id \
+        exists in no sample."
     )]
     async fn set_field(
         &self,
@@ -3683,7 +3700,13 @@ impl ServerHandler for EditorMcp {
              (every sample + which is root/active) and get_snapshot (the ACTIVE \
              sample's canvas — nodes + connections, each wire with a stable id for \
              disconnect); get_snapshot only shows the active canvas, so use \
-             list_samples + set_active_sample to navigate a multi-sample project. \
+             list_samples + set_active_sample to navigate a multi-sample project \
+             (node-targeting edits — set_field, set_automation, edit_song — act by \
+             node id across samples, so you needn't switch active first; an id in \
+             no sample errors rather than silently succeeding). set_field on an \
+             AudioParam sets its base value; a set_automation timeline overrides it \
+             when rendering, and get_node_fields shows both so you can read the \
+             effective value. \
              Mutate with the graph/sequencer/arrangement tools (or dispatch_command / \
              dispatch_batch for anything without a dedicated tool), bounce a Sound \
              and call wav_stats / waveform to inspect the result (prefer these over \
