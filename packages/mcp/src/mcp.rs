@@ -27,8 +27,8 @@ use rmcp::{
 use serde_json::Value;
 
 use awsm_audio_editor_protocol::schema::{
-    ArrSection, AutomationEvent, GainPoint, NodeId, NodeKind, NoteEvent, SampleId, SampleKind,
-    SampleLibrary,
+    ArrSection, AutomationEvent, GainPoint, MAX_NOISE_SEED, NodeId, NodeKind, NoteEvent, SampleId,
+    SampleKind, SampleLibrary,
 };
 use awsm_audio_editor_protocol::{
     ArrangeOp, AssetInfo, BoundaryPort, EditorCommand, EditorQuery, FieldValue, PlacedClip,
@@ -286,6 +286,23 @@ pub struct TrackGainItem {
 pub struct TrackGainsParams {
     /// Per-track gains to set, applied in one round-trip.
     pub gains: Vec<TrackGainItem>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct BounceVariationsParams {
+    /// The Sound to generate variations of.
+    pub sample: SampleId,
+    /// How many non-identical variations to produce (clamped to 1..=32). Each is a
+    /// new Sound (a clone) with its own bounced asset.
+    pub count: u32,
+    /// Base seed for the per-variation noise re-seeding. Same base + same Sound =
+    /// reproducible variations. Defaults to 1.
+    #[serde(default)]
+    pub seed_base: Option<u64>,
+    /// Name prefix for the created variation samples (`"<prefix> N"`). Defaults to
+    /// `"variation"`.
+    #[serde(default)]
+    pub name_prefix: Option<String>,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
@@ -2418,6 +2435,87 @@ impl EditorMcp {
     }
 
     #[tool(
+        description = "Generate N non-identical bounced variations of a Sound — the \
+        SFX deliverable (footsteps, impacts, UI clicks, debris): clones the Sound \
+        `count` times, re-seeds every `noise` source in each clone with a distinct \
+        deterministic seed, and bounces each. Same `seed_base` + same Sound \
+        reproduces the set. Returns one entry per variation \
+        {sample, name, peak, rms, clipping, suggested_gain}. Variation comes only \
+        from stochastic (noise) sources; a Sound with no noise yields identical \
+        clones (vary it another way — e.g. distinct authored Sounds). Restores the \
+        previously active sample. No arrangement needed."
+    )]
+    async fn bounce_variations(
+        &self,
+        Parameters(p): Parameters<BounceVariationsParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let count = p.count.clamp(1, 32);
+        let seed_base = p.seed_base.unwrap_or(1);
+        let prefix = p.name_prefix.as_deref().unwrap_or("variation");
+        // Serialize against the session-global active sample (we clone + bounce,
+        // which moves the active canvas) and restore it afterward.
+        let (_guard, _waited) = self.active_sample_guard().await;
+        let previous = self.active_sample_id().await.ok();
+
+        let mut variations: Vec<Value> = Vec::with_capacity(count as usize);
+        for i in 0..count {
+            // Clone the source (the clone becomes the active canvas).
+            let clone_id = self
+                .dispatch_created(EditorCommand::CloneSample { id: p.sample })
+                .await?
+                .ok_or_else(|| {
+                    McpError::invalid_params(format!("no sample {} to vary", p.sample), None)
+                })?;
+            let clone: SampleId = parse_sample_id(&clone_id)?;
+            let name = format!("{prefix} {}", i + 1);
+            self.dispatch(EditorCommand::RenameSample {
+                id: clone,
+                name: name.clone(),
+            })
+            .await?;
+            // Re-seed every noise source in the clone with a distinct seed.
+            let snap = match self.query_result(EditorQuery::Snapshot).await? {
+                QueryResult::Snapshot(s) => serde_json::to_value(&*s)
+                    .map_err(|e| McpError::internal_error(format!("encode snapshot: {e}"), None))?,
+                other => return Err(unexpected_query(other)),
+            };
+            let noise_ids = noise_node_ids(&snap);
+            for (j, node) in noise_ids.iter().enumerate() {
+                let seed = variation_seed(seed_base, i as u64 * 991 + j as u64);
+                self.dispatch(EditorCommand::SetField {
+                    id: *node,
+                    key: "seed".into(),
+                    value: FieldValue::Num(seed as f64),
+                })
+                .await?;
+            }
+            let stats = self.bounce_blocking(clone, None).await?;
+            variations.push(serde_json::json!({
+                "sample": clone,
+                "name": name,
+                "peak": stats.peak,
+                "rms": stats.rms,
+                "clipping": stats.clipping,
+                "suggested_gain": suggested_gain_for_peak(stats.peak),
+                "noise_sources_reseeded": noise_ids.len(),
+            }));
+        }
+        // Restore the active sample the caller started on.
+        if let Some(prev) = previous {
+            let _ = self.set_active_sample_raw(prev).await;
+        }
+        Ok(text(
+            serde_json::json!({
+                "ok": true,
+                "source": p.sample,
+                "count": count,
+                "variations": variations,
+            })
+            .to_string(),
+        ))
+    }
+
+    #[tool(
         description = "Render two samples and return their stats side by side \
         plus deltas (peak/RMS in dB, durations) — A/B a fork made with \
         duplicate_sample, or any two Sounds. Pass duration_secs so both sides \
@@ -3660,6 +3758,62 @@ impl EditorMcp {
         self.dispatch(EditorCommand::EditArrange { op }).await
     }
 
+    /// Kick off a bounce and block until the asset lands (or a ~30 s safety
+    /// timeout), then return its stored-bounce stats. Errors on a failed render or
+    /// a timeout. Shared by the variation generator.
+    async fn bounce_blocking(
+        &self,
+        sample: SampleId,
+        duration_secs: Option<f64>,
+    ) -> Result<awsm_audio_editor_protocol::WavStats, McpError> {
+        use std::time::{Duration, Instant};
+        self.dispatch(EditorCommand::Bounce {
+            sample,
+            duration_secs,
+        })
+        .await?;
+        let timeout = Duration::from_secs(30);
+        let start = Instant::now();
+        loop {
+            let status = match self
+                .query_result(EditorQuery::BounceStatus { sample })
+                .await?
+            {
+                QueryResult::BounceStatus(s) => s,
+                other => return Err(unexpected_query(other)),
+            };
+            if status == "clean" {
+                return match self
+                    .query_result(EditorQuery::WavStats {
+                        sample: Some(sample),
+                        bounced: true,
+                        duration_secs: None,
+                    })
+                    .await?
+                {
+                    QueryResult::WavStats(s) => Ok(s),
+                    other => Err(unexpected_query(other)),
+                };
+            }
+            if status.starts_with("failed") {
+                return Err(McpError::internal_error(
+                    format!("bounce {status} for {sample}"),
+                    None,
+                ));
+            }
+            if start.elapsed() >= timeout {
+                return Err(McpError::internal_error(
+                    format!(
+                        "bounce still '{status}' after {}s for {sample}",
+                        timeout.as_secs()
+                    ),
+                    None,
+                ));
+            }
+            tokio::time::sleep(Duration::from_millis(150)).await;
+        }
+    }
+
     /// Resolve a sequencer output key (e.g. `"t2:n36"`) to its index in node
     /// `from`'s `outputs`, by reading the current snapshot. Errors if the node or
     /// key isn't found (listing the available keys).
@@ -4765,6 +4919,31 @@ fn suggested_gain_for_peak(peak: f32) -> Option<f32> {
     }
 }
 
+/// A distinct, reproducible seed for one (variation, noise-node) slot — used by
+/// `bounce_variations` to re-seed stochastic sources so each variation differs but
+/// the set is deterministic. Clamped to the TOML-savable noise-seed range.
+fn variation_seed(base: u64, slot: u64) -> u64 {
+    // Golden-ratio odd constant spreads consecutive slots across the range.
+    base.wrapping_add(slot.wrapping_mul(0x9E37_79B9_7F4A_7C15)) % (MAX_NOISE_SEED + 1)
+}
+
+/// The node ids of every `noise` node in a serialized snapshot's active graph —
+/// the stochastic sources `bounce_variations` re-seeds.
+fn noise_node_ids(snapshot: &Value) -> Vec<NodeId> {
+    snapshot
+        .pointer("/graph/nodes")
+        .and_then(Value::as_array)
+        .map(|nodes| {
+            nodes
+                .iter()
+                .filter(|n| n.pointer("/kind/kind").and_then(Value::as_str) == Some("noise"))
+                .filter_map(|n| n.get("id").and_then(Value::as_str))
+                .filter_map(|s| s.parse::<NodeId>().ok())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 /// Apply a neutral swing offset to note starts: delay every off-grid note toward
 /// the next downbeat by `(2*ratio - 1) * grid_beats`. A note's grid position is
 /// the nearest multiple of `grid_beats`; odd positions (the off-beats) are the
@@ -5388,6 +5567,37 @@ mod tests {
         ]))
         .expect("documented automation event shapes decode");
         assert_eq!(events.len(), 5);
+    }
+
+    #[test]
+    fn variation_seeds_are_distinct_and_in_range() {
+        let seeds: Vec<u64> = (0..16).map(|i| variation_seed(7, i)).collect();
+        for s in &seeds {
+            assert!(*s <= MAX_NOISE_SEED, "seed {s} within savable range");
+        }
+        let unique: std::collections::HashSet<_> = seeds.iter().collect();
+        assert_eq!(
+            unique.len(),
+            seeds.len(),
+            "consecutive slots give distinct seeds"
+        );
+        // Deterministic.
+        assert_eq!(variation_seed(7, 3), variation_seed(7, 3));
+    }
+
+    #[test]
+    fn noise_node_ids_picks_only_noise() {
+        let snap = serde_json::json!({
+            "graph": { "nodes": [
+                { "id": "11111111-1111-1111-1111-111111111111",
+                  "kind": { "kind": "noise", "props": { "seed": 1 } } },
+                { "id": "22222222-2222-2222-2222-222222222222",
+                  "kind": { "kind": "gain", "props": { "gain": { "value": 1.0 } } } },
+            ]}
+        });
+        let ids = noise_node_ids(&snap);
+        assert_eq!(ids.len(), 1, "only the noise node is returned");
+        assert_eq!(ids[0].to_string(), "11111111-1111-1111-1111-111111111111");
     }
 
     #[test]

@@ -90,7 +90,12 @@ closest-safe behavior was chosen instead).
   effective value is inspectable; `slim_snapshot` (ids mode) keeps it. Clarified in the
   get_snapshot description that a non-empty `automation` overrides the base `value`.
   Regression test `snapshot_preserves_param_automation`.
-- [ ] #8 No per-placement variation — "bounce K seeded variations" helper (SFX + tiling) — TODO
+- [x] #8 No per-placement variation — DONE: added `bounce_variations` (clone K times,
+  re-seed every noise source with a distinct deterministic seed via `variation_seed`,
+  bounce each; returns per-variation stats + suggested_gain; restores active sample).
+  SFX-first, no arrangement needed. Pure helpers `variation_seed` + `noise_node_ids`
+  tested. Variation source is stochastic (noise); a no-noise Sound yields identical
+  clones (noted in the tool description).
 - [x] #9 [music] No swing/shuffle timing primitive — DONE: added `swing_track` tool
   (grid_beats + ratio) backed by the pure `apply_swing` (delays off-grid notes by
   `(2*ratio-1)*grid`). Style-agnostic: the server only does the offset math, no
@@ -104,7 +109,11 @@ closest-safe behavior was chosen instead).
   (mcp.rs ~2843). Verified; the report's complaint is resolved in current code.
 
 ### P3 — Smaller notes
-- [ ] P3-a DC offset from asymmetric saturation — `wave_shaper` DC-blocker option (+doc) — TODO
+- [x] P3-a DC offset from asymmetric saturation — DONE (doc, the report-sanctioned
+  option): WaveShaper catalog help now notes asymmetric shaping adds DC, that
+  wav_stats.dc_offset reports it, and that a highpass biquad_filter (~5–20 Hz) after
+  the shaper removes it (a built-in already expresses a DC blocker). Avoided a render-path
+  change (wasm-only, untestable here) for the closest-safe neutral mechanism.
 - [ ] P3-b bounce auto-duration / get_render_plan praise — no change needed (verify + note) — TODO
 - [ ] P3-c worklet workflow praise — no change needed except pitch-tracking (covered by #5) — TODO
 - [x] P3-d `load_audio` source-agnostic note — DONE: description now says which audio
