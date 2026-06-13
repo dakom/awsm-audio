@@ -192,6 +192,8 @@ fn query_result_round_trip() {
             true_peak: 0.92,
             spectral_centroid_hz: 1200.0,
             brightness: 0.25,
+            spectral_flatness: 0.1,
+            zero_crossing_rate: 2400.0,
         }),
         QueryResult::Waveform(WaveformEnvelope {
             sample_rate: 48_000,
@@ -423,6 +425,48 @@ fn wav_stats_of_silence() {
     let s = WavStats::from_pcm(&[vec![0.0f32; 1000]], 44_100);
     assert_eq!(s.peak, 0.0);
     assert_eq!(s.rms, 0.0);
+    assert_eq!(s.zero_crossing_rate, 0.0);
+}
+
+#[test]
+fn perceptual_descriptors_separate_tone_from_noise() {
+    // A pure tone is spectrally peaky (low flatness) and crosses zero at ~2×freq;
+    // white-ish noise is spectrally flat (high flatness) and crosses far more often.
+    let rate = 48_000u32;
+    let tone = WavStats::from_pcm(&sine(1000.0, 1.0, rate), rate);
+    // Deterministic pseudo-noise (LCG) so the test is stable.
+    let mut state = 0x2545F491_4F6CDD1Du64;
+    let noise: Vec<f32> = (0..rate as usize)
+        .map(|_| {
+            state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
+            // (state>>33) is in [0, 2^31); map to [-1, 1).
+            ((state >> 33) as f32 / (1u64 << 30) as f32) - 1.0
+        })
+        .collect();
+    let noisy = WavStats::from_pcm(&[noise], rate);
+
+    assert!(
+        tone.spectral_flatness < noisy.spectral_flatness,
+        "tone flatness {} should be below noise flatness {}",
+        tone.spectral_flatness,
+        noisy.spectral_flatness
+    );
+    assert!(
+        (0.0..=1.0).contains(&tone.spectral_flatness),
+        "flatness in range"
+    );
+    // ~2000 crossings/s for a 1 kHz sine; noise crosses much more often.
+    assert!(
+        (tone.zero_crossing_rate - 2000.0).abs() < 200.0,
+        "tone zcr {}",
+        tone.zero_crossing_rate
+    );
+    assert!(
+        noisy.zero_crossing_rate > tone.zero_crossing_rate,
+        "noise zcr {} > tone zcr {}",
+        noisy.zero_crossing_rate,
+        tone.zero_crossing_rate
+    );
 }
 
 #[test]

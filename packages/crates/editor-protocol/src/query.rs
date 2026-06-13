@@ -314,6 +314,18 @@ pub struct WavStats {
     /// readback, not a mastering-grade measurement.
     #[serde(default)]
     pub brightness: f32,
+    /// Spectral flatness (Wiener entropy): geometric mean / arithmetic mean of the
+    /// magnitude spectrum, ~0 for a pure tone and approaching 1 for noise-like /
+    /// dense spectra. A neutral descriptor that tends to separate tonal from noisy
+    /// or synthetic-rich material — you interpret it; the server makes no quality
+    /// judgment. (mcp-improvements #14.)
+    #[serde(default)]
+    pub spectral_flatness: f32,
+    /// Zero crossings per second over the channel mean — rises with noisiness and
+    /// high-frequency content, near-zero for a slow/low tone. A neutral timbre
+    /// descriptor, not a quality score.
+    #[serde(default)]
+    pub zero_crossing_rate: f32,
 }
 
 /// The -60 dBFS amplitude floor for the silence / attack / decay readbacks
@@ -399,7 +411,9 @@ impl WavStats {
                 }
             }
         }
-        let (spectral_centroid_hz, brightness) = spectral_summary(channels, sample_rate);
+        let (spectral_centroid_hz, brightness, spectral_flatness) =
+            spectral_summary(channels, sample_rate);
+        let zero_crossing_rate = zero_crossing_rate(channels, sample_rate);
         let (leading_silence_secs, trailing_silence_secs, attack_secs, decay_secs) =
             match (first_loud, last_loud, peak_at) {
                 (Some(first), Some(last), Some(at)) => (
@@ -428,18 +442,21 @@ impl WavStats {
             true_peak,
             spectral_centroid_hz,
             brightness,
+            spectral_flatness,
+            zero_crossing_rate,
         }
     }
 }
 
-fn spectral_summary(channels: &[Vec<f32>], sample_rate: u32) -> (f32, f32) {
+/// Returns `(spectral_centroid_hz, brightness, spectral_flatness)`.
+fn spectral_summary(channels: &[Vec<f32>], sample_rate: u32) -> (f32, f32, f32) {
     let frames = channels.iter().map(|c| c.len()).max().unwrap_or(0);
     if frames == 0 || sample_rate == 0 {
-        return (0.0, 0.0);
+        return (0.0, 0.0, 0.0);
     }
     let n = frames.min(2048);
     if n < 16 {
-        return (0.0, 0.0);
+        return (0.0, 0.0, 0.0);
     }
     let ch_count = channels.len().max(1) as f32;
     let mut mono = vec![0.0f32; n];
@@ -454,6 +471,9 @@ fn spectral_summary(channels: &[Vec<f32>], sample_rate: u32) -> (f32, f32) {
     let mut weighted = 0.0f64;
     let mut total = 0.0f64;
     let mut bright = 0.0f64;
+    // Spectral flatness = geometric mean / arithmetic mean of the magnitudes.
+    let mut log_sum = 0.0f64;
+    let mut bins = 0u32;
     for k in 1..(n / 2) {
         let freq = k as f64 * sample_rate as f64 / n as f64;
         let mut re = 0.0f64;
@@ -466,14 +486,54 @@ fn spectral_summary(channels: &[Vec<f32>], sample_rate: u32) -> (f32, f32) {
         let mag = (re * re + im * im).sqrt();
         weighted += freq * mag;
         total += mag;
+        // A tiny floor keeps the geometric mean finite for empty bins (the
+        // standard guard; a true zero would send ln() to -inf).
+        log_sum += (mag + 1e-12).ln();
+        bins += 1;
         if freq >= 4000.0 {
             bright += mag;
         }
     }
-    if total <= f64::EPSILON {
-        (0.0, 0.0)
+    if total <= f64::EPSILON || bins == 0 {
+        (0.0, 0.0, 0.0)
     } else {
-        ((weighted / total) as f32, (bright / total) as f32)
+        let arith = total / bins as f64;
+        let geo = (log_sum / bins as f64).exp();
+        let flatness = (geo / arith).clamp(0.0, 1.0) as f32;
+        ((weighted / total) as f32, (bright / total) as f32, flatness)
+    }
+}
+
+/// Zero crossings per second over the channel-mean signal — a neutral noisiness /
+/// HF-content descriptor. Pure math.
+fn zero_crossing_rate(channels: &[Vec<f32>], sample_rate: u32) -> f32 {
+    let frames = channels.iter().map(|c| c.len()).max().unwrap_or(0);
+    if frames < 2 || sample_rate == 0 {
+        return 0.0;
+    }
+    let ch_count = channels.len().max(1) as f32;
+    let mono = |i: usize| -> f32 {
+        channels
+            .iter()
+            .map(|c| c.get(i).copied().unwrap_or(0.0))
+            .sum::<f32>()
+            / ch_count
+    };
+    let mut crossings = 0u64;
+    let mut prev = mono(0);
+    for i in 1..frames {
+        let cur = mono(i);
+        // Count a sign change (treat exact 0 as no crossing to avoid double counts).
+        if (prev < 0.0 && cur >= 0.0) || (prev >= 0.0 && cur < 0.0) {
+            crossings += 1;
+        }
+        prev = cur;
+    }
+    let duration = frames as f32 / sample_rate as f32;
+    if duration > 0.0 {
+        crossings as f32 / duration
+    } else {
+        0.0
     }
 }
 

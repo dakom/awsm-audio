@@ -1051,10 +1051,14 @@ impl EditorMcp {
     }
 
     #[tool(description = "Numeric stats of a Sound: duration_secs, peak, rms, \
-        channels, sample_rate. By default measures the LIVE graph (what it sounds \
-        like right now). Set bounced=true to measure the stored BOUNCED asset (what \
-        plays in arrangements) — returns 'not yet bounced' if it hasn't been \
-        bounced. Omit `sample` for the root.")]
+        channels, sample_rate, spectral_centroid_hz, spectral_flatness (0=tonal, \
+        1=noise-like), zero_crossing_rate. By default measures the LIVE graph (what \
+        it sounds like right now). Set bounced=true to measure the stored BOUNCED \
+        asset (what plays in arrangements) — returns 'not yet bounced' if it hasn't \
+        been bounced. Omit `sample` for the root. These are LEVEL/spectrum \
+        descriptors, not quality: they can't hear whether a sound is synthetic, \
+        grooveless, or the intended object — don't treat clean stats as success for \
+        a creative brief; preview a few seconds and get the user's reaction.")]
     async fn wav_stats(
         &self,
         Parameters(p): Parameters<WavStatsParams>,
@@ -3196,8 +3200,10 @@ impl EditorMcp {
         existing AudioBufferSource (or Convolver) node's buffer. add_node an \
         audio_buffer_source first, then load_audio onto it, then connect it. \
         Provide exactly one of `path` (an agent-local file — the server hosts it \
-        and the editor fetches it off the link) or `url` (a browser-reachable \
-        URL). Bytes never cross the editor link. Returns the decoded duration / \
+        and the editor fetches it off the link) or `url` (a browser-reachable URL; \
+        works from CORS-open hosts). Bytes never cross the editor link. WHICH audio \
+        to load is your decision — the server is source-agnostic and endorses no \
+        particular sample source or URL. Returns the decoded duration / \
         sample-rate / channel count; render_wav / waveform to inspect it."
     )]
     async fn load_audio(
@@ -3719,7 +3725,23 @@ impl ServerHandler for EditorMcp {
              nonlinearities, or custom synthesis (not chorus/phaser/distortion, \
              which are delay/all-pass/waveshaper). Use scaffold_worklet to emit a \
              ready-to-build crate, then attach_wasm the compiled .wasm (read \
-             awsm-audio://docs/worklet-abi for the ABI).\n\n\
+             awsm-audio://docs/worklet-abi for the ABI). That 'built-ins first' rule \
+             is about EFFORT, not about how distinctive the result can be: for a \
+             brief that wants a distinctive, organic, or signature character (SFX or \
+             music), real samples (load_audio) and/or a worklet are often the FIRST \
+             tools to reach for, not the last — an oscillator+filter+shaper stack \
+             tends to sound synthetic. (Which samples and what DSP are your call; the \
+             server stays source- and style-agnostic.) These escape hatches are \
+             available, not exotic: the Rust->wasm worklet toolchain \
+             (wasm32-unknown-unknown) and load_audio from a local path or a \
+             CORS-open URL both work — treat them as step-zero options. \
+             Verification caveat: wav_stats / waveform measure LEVEL (peak, RMS, \
+             clipping, centroid), not character, feel, or whether the sound is the \
+             intended object — a 'clean, peak 0.94' bounce can still be synthetic, \
+             grooveless, or just not read as the thing you meant (a 'laser' that's a \
+             buzz). Don't treat clean stats as success for a creative brief; render a \
+             few seconds early and get the user's reaction before building out the \
+             full SFX set or arrangement.\n\n\
              For a song / full-track request, work arrangement-first instead \
              of one monolithic root sequencer: build and bounce each part as its own \
              short loop Sound, then create_arrangement and place clips into sections — \
@@ -4273,6 +4295,17 @@ A compile error here is yours to fix — it shows up in your own build output.
 
 A module that compiles but violates the ABI returns the error from `attach_wasm`.
 
+## Pitch tracking
+
+A worklet voice does **not** receive the played note's pitch. When a sequencer
+triggers an instrument it transposes only oscillator `frequency` (by
+`note − 60` semitones); a worklet's params are left at their authored values for
+every note (see `awsm-audio://docs/instruments`). So a worklet is fixed-pitch under
+the sequencer — great for textures, drums, effects, and per-sample DSP, but it
+can't follow a melody from the note number alone. If you need a pitched worklet
+voice, expose a `frequency` (or similar) param and drive it yourself with
+`set_automation`, or place it on a single pitch.
+
 ## 4. Driving a worklet source for a real duration
 
 A worklet used directly as a *source* Sound often renders only a tiny default
@@ -4353,8 +4386,30 @@ pitch for the note's length, and routes the outlet to the mix.
 - A Sound with **no** outlet boundary just auditions its loose ends to master — fine
   for sound-design, but to be *played by a sequencer* it needs the outlet.
 - The trigger sets the voice's pitch (from the note number) and gate length (from
-  the note's length). Sources that respond to pitch (oscillator frequency) track
-  the note; others (noise, samples) just start/stop.
+  the note's length). Which sources actually follow the pitch is spelled out next.
+
+## Pitch tracking — which sources follow the note (and which don't)
+
+A sequencer triggers a voice by **transposing the instrument graph by
+`note − 60` semitones** (MIDI note 60 = unison). Only **oscillators** are
+transposed:
+
+- **Oscillator** — both `frequency` (its base value *and* any automation) are
+  scaled by `2^((note−60)/12)`. So the authored `frequency` is the voice's pitch
+  **at note 60**, and every played note is *relative* to it — author it as your
+  root/reference pitch, and don't expect a given note number to map to an absolute
+  Hz. (`detune` adds cents on top.) For a fixed pitch-drop envelope (e.g. a kick),
+  the whole envelope transposes with the note, keeping its shape. This is also why,
+  for a sequenced oscillator, the authored base `frequency` looks "ignored" if you
+  read it back expecting the note's Hz — it's the reference, not the result.
+- **audio_buffer_source, audio_worklet, noise** — **do NOT pitch-track.** A sampled
+  voice plays at its authored `playback_rate`/`detune`, and a worklet at its
+  authored params, regardless of the note number; the note only gates start/stop
+  and length. This is fine (often desirable) for drums, one-shots, textures, and
+  most SFX. But it means you **cannot** build a melodic sampler or a melodic worklet
+  voice that follows the sequencer purely from the note number — use an oscillator
+  source for melodic content, or drive pitch yourself (per-clip `transpose`, or
+  authoring distinct Sounds/automation per pitch).
 
 ## Envelope timing (AudioParam automation)
 

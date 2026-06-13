@@ -56,13 +56,28 @@ closest-safe behavior was chosen instead).
 
 ### P1 — Footguns / guardrails
 - [ ] #4 No clip/level warning at bounce for hot stacks (suggested-gain / auto-normalize) — TODO
-- [ ] #5 [doc] Pitch-tracking limitation undocumented (instruments + worklet-abi) — TODO
-- [ ] #6 [doc] Oscillator base `frequency` ignored for pitched voices, can't tell — TODO
+- [x] #5 [doc] Pitch-tracking limitation undocumented — DONE: new "Pitch tracking"
+  section in INSTRUMENTS_DOC + a section in WORKLET_ABI_DOC. States plainly only
+  oscillators transpose (verified against `schema::Graph::transposed`); samples/
+  worklets/noise are fixed-pitch under the sequencer. (Opt-in pitch-track *path* is a
+  larger code change tracked separately; the limitation itself is now documented.)
+- [x] #6 [doc] Oscillator base `frequency` is the reference at note 60 — DONE:
+  documented precisely in INSTRUMENTS_DOC (authored freq = pitch at MIDI 60, notes
+  transpose relative; that's why it looks "ignored"), and in the set_field description.
 
 ### P1 — Discoverability & feedback
-- [ ] #13 [doc] High-character tools framed as last-resort — add capability-neutral nudge — TODO
-- [ ] #14 [doc/code] No perceptual feedback — preview-checkpoint doc + optional neutral descriptors — TODO
-- [ ] #15 [doc] Capabilities aren't discoverable (toolchain / load_audio) — capability line — TODO
+- [x] #13 [doc] High-character tools framed as last-resort — DONE: added a
+  capability-neutral nudge to info.instructions ('built-ins first' is about EFFORT,
+  not uniqueness; for distinctive/organic briefs reach for real samples/worklets up
+  front). Points at tools only — no genre/source/sound named.
+- [x] #14 [doc+code] No perceptual feedback — DONE: (doc) preview-checkpoint + "stats
+  measure level, not character/feel/intended-object" caveat in instructions and the
+  wav_stats description; (code) added neutral perceptual descriptors to WavStats —
+  `spectral_flatness` (tonal↔noise) and `zero_crossing_rate` — computed in the pure,
+  natively-tested `WavStats::from_pcm`. Test `perceptual_descriptors_separate_tone_from_noise`.
+- [x] #15 [doc] Capabilities aren't discoverable — DONE: capability line in
+  info.instructions (Rust→wasm worklet toolchain + load_audio path/CORS-open URL both
+  work, "step-zero options"); load_audio description notes CORS-open URLs work.
 
 ### P2 — Ergonomics / productivity
 - [x] #7 `get_snapshot detail:"ids"` reports default param values, not authored ones —
@@ -81,7 +96,8 @@ closest-safe behavior was chosen instead).
 - [ ] P3-a DC offset from asymmetric saturation — `wave_shaper` DC-blocker option (+doc) — TODO
 - [ ] P3-b bounce auto-duration / get_render_plan praise — no change needed (verify + note) — TODO
 - [ ] P3-c worklet workflow praise — no change needed except pitch-tracking (covered by #5) — TODO
-- [ ] P3-d `load_audio` source-agnostic note (CORS-open hosts; no baked sources) — TODO
+- [x] P3-d `load_audio` source-agnostic note — DONE: description now says which audio
+  to load is the agent's decision (server endorses no source) + URLs work from CORS-open hosts.
 - [ ] P3-e `verify_arrangement` praise — no change needed (verify + note) — TODO
 
 ## Notes / decisions log
