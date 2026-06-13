@@ -202,7 +202,10 @@ fn doc_body(kind: &NodeKind) -> &'static str {
         NodeKind::WaveShaper(_) => {
             "Non-linear distortion/saturation. Pick a 'shape' (tanh = warm, hard clip = \
              aggressive, fold = metallic wavefolder); 'amount' is the drive. Choose \
-             'custom' to draw your own transfer curve in the inspector (input → output)."
+             'custom' to draw your own transfer curve in the inspector (input → output). \
+             Asymmetric shaping (a biased tanh, or a custom curve that isn't odd-symmetric) \
+             adds a DC offset — wav_stats reports it as dc_offset; remove it with a \
+             highpass biquad_filter (~5–20 Hz) after the shaper."
         }
         NodeKind::Convolver(_) => {
             "Convolves the signal with an impulse response — the standard way to do reverb \

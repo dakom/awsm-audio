@@ -17,7 +17,7 @@ resolver = "2"
 [workspace.package]
 description = "awsm audio"
 edition = "2021"
-version = "2.0.0"
+version = "2.1.0"
 license = "MIT OR Apache-2.0"
 authors = ["David Komer"]
 rust-version = "1.80.0"
@@ -81,10 +81,10 @@ lto = "thin"
 
 # Internal awsm-audio-* crates. Version kept in lockstep with
 # `workspace.package.version` so published crates carry concrete version reqs.
-awsm-audio-schema = { path = "packages/crates/schema", version = "2.0.0" }
-awsm-audio-player = { path = "packages/crates/player", version = "2.0.0" }
-awsm-audio-worklet = { path = "packages/crates/worklet", version = "2.0.0" }
-awsm-audio-editor-protocol = { path = "packages/crates/editor-protocol", version = "2.0.0" }
+awsm-audio-schema = { path = "packages/crates/schema", version = "2.1.0" }
+awsm-audio-player = { path = "packages/crates/player", version = "2.1.0" }
+awsm-audio-worklet = { path = "packages/crates/worklet", version = "2.1.0" }
+awsm-audio-editor-protocol = { path = "packages/crates/editor-protocol", version = "2.1.0" }
 
 # Error handling
 anyhow = "1.0.102"

@@ -433,4 +433,30 @@ impl EditorCommand {
                 | EditorCommand::SetListener { .. }
         )
     }
+
+    /// The single canvas node this command edits, when it targets exactly one.
+    ///
+    /// Used by the editor to detect a command aimed at a node that isn't on the
+    /// *active* canvas (the live `nodes` list only holds the active sample's
+    /// graph): such a command would otherwise match no node and silently no-op.
+    /// Returns `None` for commands that target no node, target a sample/clip, or
+    /// span two nodes (a wire — `Connect`/`Modulate`/`Bind`/`Disconnect`), where
+    /// "the owning sample" isn't well defined from a single id.
+    pub fn target_node(&self) -> Option<NodeId> {
+        match self {
+            EditorCommand::SetField { id, .. }
+            | EditorCommand::SetAutomation { id, .. }
+            | EditorCommand::RemoveNode { id }
+            | EditorCommand::CloneNode { id }
+            | EditorCommand::RenameNode { id, .. }
+            | EditorCommand::MoveNode { id, .. }
+            | EditorCommand::SetInputDefault { node: id, .. }
+            | EditorCommand::SetInputValue { node: id, .. }
+            | EditorCommand::SetSampleRef { node: id, .. } => Some(*id),
+            EditorCommand::EditSong { node, .. } | EditorCommand::EditControl { node, .. } => {
+                Some(*node)
+            }
+            _ => None,
+        }
+    }
 }

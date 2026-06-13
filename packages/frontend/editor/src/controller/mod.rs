@@ -1177,6 +1177,60 @@ impl EditorController {
         self.created_id.borrow_mut().take()
     }
 
+    /// Dispatch a command on behalf of a remote (MCP) driver, acting **by node
+    /// id regardless of which sample is the active canvas**.
+    ///
+    /// The live `nodes` list only holds the active sample's graph, so a
+    /// node-targeting command (`set_field`, `set_automation`, `edit_song`, …) for
+    /// a node that lives in a *different* sample would otherwise match nothing and
+    /// silently no-op while the transport still reported `ok`. That silent
+    /// data-loss is the P0 bug from `docs/plans/mcp-improvements.md` (#1/#2/#3).
+    ///
+    /// Behaviour:
+    /// - node on the active canvas (or a non-node-targeting command) → dispatch normally.
+    /// - node in another sample → transiently switch to that sample, apply the
+    ///   edit there, switch back, and preserve the previous sample's undo history.
+    /// - node in no sample at all → return `Err` (never a silent success).
+    ///
+    /// Returns the id minted by the command (node/sample/boundary), mirroring
+    /// `dispatch` + `take_created_id`.
+    pub fn dispatch_remote(&self, cmd: EditorCommand) -> Result<Option<String>, String> {
+        if let Some(target) = cmd.target_node() {
+            if self.node_by_id(target).is_none() {
+                // Not on the active canvas — find the sample whose stored graph
+                // owns this node (node ids are globally unique across samples).
+                let owner = self
+                    .samples
+                    .borrow()
+                    .iter()
+                    .find(|s| s.sample.graph.nodes.iter().any(|n| n.id == target))
+                    .map(|s| s.sample.id);
+                let Some(owner) = owner else {
+                    return Err(format!(
+                        "node {target} not found in any sample — it may have been removed, \
+                         or the id is wrong. Use get_snapshot (per active sample) or list_samples \
+                         to find the right node id."
+                    ));
+                };
+                let previous = *self.active.borrow();
+                // Preserve the user's active-canvas undo history across the
+                // transient switch (load_sample_onto_canvas clears the stacks).
+                let saved_undo = self.undo_stack.borrow().clone();
+                let saved_redo = self.redo_stack.borrow().clone();
+                self.switch_sample(owner); // commits `previous`, loads `owner`
+                self.dispatch(cmd);
+                let created = self.take_created_id();
+                self.switch_sample(previous); // commits `owner` (saving the edit), reloads `previous`
+                *self.undo_stack.borrow_mut() = saved_undo;
+                *self.redo_stack.borrow_mut() = saved_redo;
+                self.refresh_undo_flags();
+                return Ok(created);
+            }
+        }
+        self.dispatch(cmd);
+        Ok(self.take_created_id())
+    }
+
     pub fn dispatch(&self, cmd: EditorCommand) {
         // Each dispatch reports at most one created id; clear the prior one so a
         // non-creating command leaves `None` (see `created_id`).
@@ -1533,7 +1587,7 @@ impl EditorController {
                         let help = crate::catalog::doc(&kind);
                         let fields = crate::fields::fields(&kind)
                             .iter()
-                            .map(field_info)
+                            .map(|f| field_info(f, &kind))
                             .collect();
                         out.push(NodeKindInfo {
                             kind: tag,
@@ -1551,15 +1605,34 @@ impl EditorController {
             // Discovery: the editable fields of one live node (covers worklet
             // nodes whose params are discovered at runtime).
             EditorQuery::NodeFields { node } => {
-                let lock = self.nodes.lock_ref();
-                let fields = lock
-                    .iter()
-                    .find(|n| n.id == node)
-                    .map(|n| {
+                // Look on the active canvas first; fall back to any other sample's
+                // stored graph so the fields (and the effective-value automation
+                // readback) are reachable by id regardless of the active sample —
+                // matching dispatch_remote (mcp-improvements #1/#2/#7).
+                let active = {
+                    let lock = self.nodes.lock_ref();
+                    lock.iter().find(|n| n.id == node).map(|n| {
                         let k = n.kind.borrow();
-                        crate::fields::fields(&k).iter().map(field_info).collect()
+                        crate::fields::fields(&k)
+                            .iter()
+                            .map(|f| field_info(f, &k))
+                            .collect::<Vec<_>>()
                     })
-                    .unwrap_or_default();
+                };
+                let fields = active.unwrap_or_else(|| {
+                    self.samples
+                        .borrow()
+                        .iter()
+                        .flat_map(|s| s.sample.graph.nodes.iter())
+                        .find(|n| n.id == node)
+                        .map(|n| {
+                            crate::fields::fields(&n.kind)
+                                .iter()
+                                .map(|f| field_info(f, &n.kind))
+                                .collect::<Vec<_>>()
+                        })
+                        .unwrap_or_default()
+                });
                 QueryResult::NodeFields(fields)
             }
             // Discovery: every modulatable param across the active canvas — the
@@ -5673,8 +5746,20 @@ fn call_f64(exports: &js_sys::Object, name: &str, arg: Option<f64>) -> Option<f6
 /// serializable [`FieldInfo`](command::FieldInfo) the MCP discovery queries
 /// (`Catalog` / `NodeFields`) return — so an agent learns a node's `set_field`
 /// keys, control type, and current value without knowing the schema.
-fn field_info(f: &crate::fields::Field) -> command::FieldInfo {
+fn field_info(f: &crate::fields::Field, kind: &awsm_audio_schema::NodeKind) -> command::FieldInfo {
     use crate::fields::Control;
+    // Effective-value readback (mcp-improvements #1/#7): if this field maps to an
+    // automatable AudioParam carrying a timeline, surface that timeline so the
+    // caller can tell that the *rendered* value differs from the base `value_num`.
+    let automation = f
+        .modulation
+        .and_then(|param| {
+            crate::fields::audio_params(kind)
+                .into_iter()
+                .find(|p| p.key == param)
+        })
+        .map(|p| p.automation)
+        .unwrap_or_default();
     let (control, value_num, value_text, options) = match &f.control {
         Control::Number(n) => ("number".to_string(), Some(*n), None, Vec::new()),
         Control::Choice { value, options } => (
@@ -5698,6 +5783,7 @@ fn field_info(f: &crate::fields::Field) -> command::FieldInfo {
         value_text,
         options,
         modulatable: f.modulation.is_some(),
+        automation,
     }
 }
 
@@ -5820,4 +5906,294 @@ fn read_name(view: &js_sys::Uint8Array, exports: &js_sys::Object, i: f64) -> Opt
     let mut bytes = vec![0u8; len as usize];
     view.subarray(ptr, ptr + len).copy_to(&mut bytes);
     String::from_utf8(bytes).ok()
+}
+
+#[cfg(test)]
+mod dispatch_remote_tests {
+    //! Regression tests for the P0 silent-no-op bugs in
+    //! `docs/plans/mcp-improvements.md` (#1 set_field on AudioParams, #2
+    //! edit_song/output-gain off the active canvas, #3 output gain). The bridge
+    //! used to return `ok` whether or not a node-targeting command matched a node;
+    //! `dispatch_remote` now acts by node id across samples and errors when the
+    //! node exists nowhere. `EditorController::new()` is web_sys-free, so these run
+    //! on host.
+    use super::*;
+    use awsm_audio_editor_protocol::FieldValue;
+    use awsm_audio_schema::{AutomationEvent, NodeKind, SampleId, SampleKind};
+
+    fn add_node_get_id(ctrl: &EditorController, kind: NodeKind) -> NodeId {
+        ctrl.dispatch(EditorCommand::AddNode {
+            kind,
+            x: 0.0,
+            y: 0.0,
+        });
+        ctrl.nodes.lock_ref().last().expect("node added").id
+    }
+
+    fn active_gain(ctrl: &EditorController, node: NodeId) -> Option<f32> {
+        ctrl.node_by_id(node).and_then(|n| match &*n.kind.borrow() {
+            NodeKind::Gain(g) => Some(g.gain.value),
+            NodeKind::Output(o) => Some(o.gain.value),
+            _ => None,
+        })
+    }
+
+    fn stored_gain(ctrl: &EditorController, sample: SampleId, node: NodeId) -> Option<f32> {
+        ctrl.samples
+            .borrow()
+            .iter()
+            .find(|s| s.sample.id == sample)
+            .and_then(|s| s.sample.graph.nodes.iter().find(|n| n.id == node))
+            .and_then(|n| match &n.kind {
+                NodeKind::Gain(g) => Some(g.gain.value),
+                NodeKind::Output(o) => Some(o.gain.value),
+                _ => None,
+            })
+    }
+
+    fn stored_automation(
+        ctrl: &EditorController,
+        sample: SampleId,
+        node: NodeId,
+    ) -> Vec<AutomationEvent> {
+        ctrl.samples
+            .borrow()
+            .iter()
+            .find(|s| s.sample.id == sample)
+            .and_then(|s| s.sample.graph.nodes.iter().find(|n| n.id == node))
+            .map(|n| match &n.kind {
+                NodeKind::Gain(g) => g.gain.automation.clone(),
+                _ => Vec::new(),
+            })
+            .unwrap_or_default()
+    }
+
+    // #1: set_field on an AudioParam scalar writes the base value on the active canvas.
+    #[test]
+    fn set_field_audioparam_applies_on_active_canvas() {
+        let ctrl = EditorController::new();
+        let gain = add_node_get_id(&ctrl, NodeKind::Gain(Default::default()));
+        let r = ctrl.dispatch_remote(EditorCommand::SetField {
+            id: gain,
+            key: "gain".into(),
+            value: FieldValue::Num(0.25),
+        });
+        assert!(r.is_ok());
+        assert_eq!(active_gain(&ctrl, gain), Some(0.25));
+    }
+
+    // #2/#3: set_field on a node in a NON-active sample is applied to that sample
+    // (acts by id), not silently dropped — and the active canvas is preserved.
+    #[test]
+    fn set_field_applies_cross_sample() {
+        let ctrl = EditorController::new();
+        let sample_a = ctrl.active_sample();
+        let gain = add_node_get_id(&ctrl, NodeKind::Gain(Default::default()));
+        // Create + switch to sample B; A (with the gain node) is now non-active.
+        ctrl.dispatch(EditorCommand::AddSample {
+            kind: SampleKind::Sound,
+        });
+        let sample_b = ctrl.active_sample();
+        assert_ne!(sample_a, sample_b);
+        assert!(
+            ctrl.node_by_id(gain).is_none(),
+            "gain not on active canvas B"
+        );
+
+        let r = ctrl.dispatch_remote(EditorCommand::SetField {
+            id: gain,
+            key: "gain".into(),
+            value: FieldValue::Num(0.5),
+        });
+        assert!(r.is_ok(), "cross-sample set_field should succeed: {r:?}");
+        // Applied to A's stored graph, and the active canvas is still B.
+        assert_eq!(stored_gain(&ctrl, sample_a, gain), Some(0.5));
+        assert_eq!(ctrl.active_sample(), sample_b);
+    }
+
+    // #3: output node gain honored cross-sample (a natural first reach for trim).
+    #[test]
+    fn output_gain_applies_cross_sample() {
+        let ctrl = EditorController::new();
+        let sample_a = ctrl.active_sample();
+        let out = add_node_get_id(&ctrl, NodeKind::Output(Default::default()));
+        ctrl.dispatch(EditorCommand::AddSample {
+            kind: SampleKind::Sound,
+        });
+        let r = ctrl.dispatch_remote(EditorCommand::SetField {
+            id: out,
+            key: "gain".into(),
+            value: FieldValue::Num(0.3),
+        });
+        assert!(r.is_ok());
+        assert_eq!(stored_gain(&ctrl, sample_a, out), Some(0.3));
+    }
+
+    // #1 (automation path): set_automation reaches a node in another sample too.
+    #[test]
+    fn set_automation_applies_cross_sample() {
+        let ctrl = EditorController::new();
+        let sample_a = ctrl.active_sample();
+        let gain = add_node_get_id(&ctrl, NodeKind::Gain(Default::default()));
+        ctrl.dispatch(EditorCommand::AddSample {
+            kind: SampleKind::Sound,
+        });
+        let events = vec![
+            AutomationEvent::SetValue {
+                value: 0.0,
+                time: 0.0,
+            },
+            AutomationEvent::LinearRamp {
+                value: 1.0,
+                time: 0.01,
+            },
+        ];
+        let r = ctrl.dispatch_remote(EditorCommand::SetAutomation {
+            id: gain,
+            param: "gain".into(),
+            events: events.clone(),
+        });
+        assert!(r.is_ok());
+        assert_eq!(stored_automation(&ctrl, sample_a, gain).len(), 2);
+    }
+
+    // Never a silent success: a node id that lives in no sample errors.
+    #[test]
+    fn node_targeting_command_errors_when_node_absent() {
+        let ctrl = EditorController::new();
+        let r = ctrl.dispatch_remote(EditorCommand::SetField {
+            id: NodeId::new(),
+            key: "gain".into(),
+            value: FieldValue::Num(0.5),
+        });
+        assert!(r.is_err(), "expected an error for an unknown node id");
+    }
+
+    // #1/#7 effective-value readback: NodeFields surfaces a param's automation
+    // timeline so the caller can tell the rendered value differs from the base.
+    #[test]
+    fn node_fields_surfaces_automation_readback() {
+        let ctrl = EditorController::new();
+        let gain = add_node_get_id(&ctrl, NodeKind::Gain(Default::default()));
+        // Base value via set_field, then a timeline via set_automation.
+        ctrl.dispatch_remote(EditorCommand::SetField {
+            id: gain,
+            key: "gain".into(),
+            value: FieldValue::Num(0.75),
+        })
+        .unwrap();
+        ctrl.dispatch_remote(EditorCommand::SetAutomation {
+            id: gain,
+            param: "gain".into(),
+            events: vec![AutomationEvent::SetValue {
+                value: 0.2,
+                time: 0.0,
+            }],
+        })
+        .unwrap();
+        let QueryResult::NodeFields(fields) = ctrl.query(EditorQuery::NodeFields { node: gain })
+        else {
+            panic!("expected NodeFields");
+        };
+        let gain_field = fields.iter().find(|f| f.key == "gain").expect("gain field");
+        assert_eq!(
+            gain_field.value_num,
+            Some(0.75),
+            "base value still reported"
+        );
+        assert_eq!(
+            gain_field.automation.len(),
+            1,
+            "automation timeline surfaced as the effective-value readback"
+        );
+    }
+
+    // NodeFields is reachable by id for a node in a non-active sample (readback
+    // is not gated on the active canvas).
+    #[test]
+    fn node_fields_works_cross_sample() {
+        let ctrl = EditorController::new();
+        let gain = add_node_get_id(&ctrl, NodeKind::Gain(Default::default()));
+        ctrl.dispatch_remote(EditorCommand::SetField {
+            id: gain,
+            key: "gain".into(),
+            value: FieldValue::Num(0.625),
+        })
+        .unwrap();
+        ctrl.dispatch(EditorCommand::AddSample {
+            kind: SampleKind::Sound,
+        });
+        assert!(ctrl.node_by_id(gain).is_none());
+        let QueryResult::NodeFields(fields) = ctrl.query(EditorQuery::NodeFields { node: gain })
+        else {
+            panic!("expected NodeFields");
+        };
+        assert_eq!(
+            fields
+                .iter()
+                .find(|f| f.key == "gain")
+                .and_then(|f| f.value_num),
+            Some(0.625)
+        );
+    }
+
+    // #7: the snapshot keeps a param's automation, so an automated param's
+    // effective value stays inspectable (the base value alone would mislead).
+    #[test]
+    fn snapshot_preserves_param_automation() {
+        let ctrl = EditorController::new();
+        let gain = add_node_get_id(&ctrl, NodeKind::Gain(Default::default()));
+        ctrl.dispatch_remote(EditorCommand::SetAutomation {
+            id: gain,
+            param: "gain".into(),
+            events: vec![AutomationEvent::SetValue {
+                value: 0.5,
+                time: 0.0,
+            }],
+        })
+        .unwrap();
+        let QueryResult::Snapshot(snap) = ctrl.query(EditorQuery::Snapshot) else {
+            panic!("expected Snapshot");
+        };
+        let v = serde_json::to_value(&*snap).unwrap();
+        let nodes = v
+            .pointer("/graph/nodes")
+            .and_then(|n| n.as_array())
+            .expect("graph nodes in snapshot");
+        let automated = nodes.iter().any(|n| {
+            n.pointer("/kind/props/gain/automation")
+                .and_then(|a| a.as_array())
+                .map(|a| !a.is_empty())
+                .unwrap_or(false)
+        });
+        assert!(automated, "param automation present in snapshot JSON: {v}");
+    }
+
+    // Undo history on the user's active sample survives a transient cross-sample edit.
+    #[test]
+    fn cross_sample_edit_preserves_active_undo() {
+        let ctrl = EditorController::new();
+        let gain = add_node_get_id(&ctrl, NodeKind::Gain(Default::default()));
+        ctrl.dispatch(EditorCommand::AddSample {
+            kind: SampleKind::Sound,
+        });
+        // Make an undoable edit on the active canvas (B).
+        ctrl.dispatch(EditorCommand::AddNode {
+            kind: NodeKind::Gain(Default::default()),
+            x: 1.0,
+            y: 1.0,
+        });
+        let could_undo = ctrl.can_undo.get();
+        ctrl.dispatch_remote(EditorCommand::SetField {
+            id: gain,
+            key: "gain".into(),
+            value: FieldValue::Num(0.5),
+        })
+        .unwrap();
+        assert_eq!(
+            ctrl.can_undo.get(),
+            could_undo,
+            "active-canvas undo state preserved across the cross-sample edit"
+        );
+    }
 }

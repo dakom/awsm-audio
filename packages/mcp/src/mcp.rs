@@ -27,8 +27,8 @@ use rmcp::{
 use serde_json::Value;
 
 use awsm_audio_editor_protocol::schema::{
-    ArrSection, AutomationEvent, GainPoint, NodeId, NodeKind, NoteEvent, SampleId, SampleKind,
-    SampleLibrary,
+    ArrSection, AutomationEvent, GainPoint, MAX_NOISE_SEED, NodeId, NodeKind, NoteEvent, SampleId,
+    SampleKind, SampleLibrary,
 };
 use awsm_audio_editor_protocol::{
     ArrangeOp, AssetInfo, BoundaryPort, EditorCommand, EditorQuery, FieldValue, PlacedClip,
@@ -228,6 +228,24 @@ pub struct SetAutomationParams {
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct AutomationItem {
+    /// Target node id.
+    pub node: NodeId,
+    /// The AudioParam field key to automate (e.g. `"gain"`, `"frequency"`).
+    pub param: String,
+    /// The complete scheduled timeline for that param (REPLACES existing events).
+    pub events: Vec<AutomationEvent>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct SetAutomationsParams {
+    /// One `{node, param, events}` per AudioParam to set, applied in order in a
+    /// single round-trip. Items may target different nodes (and, since edits act
+    /// by node id, different samples).
+    pub items: Vec<AutomationItem>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct ValidateParams {
     /// Commands to validate without dispatching — the same shapes
     /// dispatch_batch / dispatch_refs accept, including `"ref"` labels,
@@ -268,6 +286,23 @@ pub struct TrackGainItem {
 pub struct TrackGainsParams {
     /// Per-track gains to set, applied in one round-trip.
     pub gains: Vec<TrackGainItem>,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct BounceVariationsParams {
+    /// The Sound to generate variations of.
+    pub sample: SampleId,
+    /// How many non-identical variations to produce (clamped to 1..=32). Each is a
+    /// new Sound (a clone) with its own bounced asset.
+    pub count: u32,
+    /// Base seed for the per-variation noise re-seeding. Same base + same Sound =
+    /// reproducible variations. Defaults to 1.
+    #[serde(default)]
+    pub seed_base: Option<u64>,
+    /// Name prefix for the created variation samples (`"<prefix> N"`). Defaults to
+    /// `"variation"`.
+    #[serde(default)]
+    pub name_prefix: Option<String>,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
@@ -754,6 +789,21 @@ pub struct ScaleVelocitiesParams {
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
+pub struct SwingTrackParams {
+    pub node: NodeId,
+    pub track: usize,
+    /// The swing subdivision in beats — the grid whose off-positions get delayed.
+    /// e.g. 0.5 swings eighth-notes, 0.25 swings sixteenths. A swing "pair" spans
+    /// 2× this. Must be > 0.
+    pub grid_beats: f64,
+    /// Swing ratio in [0.5, 1.0]. 0.5 = straight (no change); higher delays each
+    /// off-grid note toward the next downbeat (e.g. 0.667 = triplet feel). Clamped
+    /// to [0.5, 1.0]. The ratio, the grid, and whether to swing at all are YOUR
+    /// call — the server only applies the offset math (no built-in groove preset).
+    pub ratio: f64,
+}
+
+#[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
 pub struct HumanizeTrackParams {
     pub node: NodeId,
     pub track: usize,
@@ -870,8 +920,12 @@ impl EditorMcp {
         only — call list_samples to see every sample and switch with \
         set_active_sample. Each connection carries a stable `id` you can pass to \
         the `disconnect` command to remove that one wire without touching its \
-        endpoint nodes. Pass `detail:\"ids\"` to omit the large embedded sequencer \
-        song events (keeps node ids/kinds/wires + per-track note counts) on later \
+        endpoint nodes. Each AudioParam shows its base `value` plus an \
+        `automation` array (present only when set) — when that array is non-empty \
+        the timeline, not the base `value`, is the effective rendered value, so \
+        don't read a bare param value as authoritative. Pass `detail:\"ids\"` to \
+        omit the large embedded sequencer song events (keeps node ids/kinds/wires \
+        + per-track note counts, and keeps each param's automation) on later \
         round-trips."
     )]
     async fn get_snapshot(
@@ -900,9 +954,13 @@ impl EditorMcp {
     }
 
     #[tool(description = "The editable fields of one live node: each `key` (for \
-        set_field), control type, current value, choice options, and whether it's \
-        modulation-targetable. Use this to discover a node's set_field keys \
-        (including a worklet's discovered params).")]
+        set_field), control type, current value, choice options, whether it's \
+        modulation-targetable, and any AudioParam `automation` timeline. Use this \
+        to discover a node's set_field keys (including a worklet's discovered \
+        params). When a field's `automation` array is non-empty the rendered value \
+        is driven by that timeline (not the base `value_num`) — this is the \
+        effective-value readback. Resolves by node id across all samples, not just \
+        the active canvas.")]
     async fn get_node_fields(
         &self,
         Parameters(p): Parameters<NodeArg>,
@@ -1043,10 +1101,14 @@ impl EditorMcp {
     }
 
     #[tool(description = "Numeric stats of a Sound: duration_secs, peak, rms, \
-        channels, sample_rate. By default measures the LIVE graph (what it sounds \
-        like right now). Set bounced=true to measure the stored BOUNCED asset (what \
-        plays in arrangements) — returns 'not yet bounced' if it hasn't been \
-        bounced. Omit `sample` for the root.")]
+        channels, sample_rate, spectral_centroid_hz, spectral_flatness (0=tonal, \
+        1=noise-like), zero_crossing_rate. By default measures the LIVE graph (what \
+        it sounds like right now). Set bounced=true to measure the stored BOUNCED \
+        asset (what plays in arrangements) — returns 'not yet bounced' if it hasn't \
+        been bounced. Omit `sample` for the root. These are LEVEL/spectrum \
+        descriptors, not quality: they can't hear whether a sound is synthetic, \
+        grooveless, or the intended object — don't treat clean stats as success for \
+        a creative brief; preview a few seconds and get the user's reaction.")]
     async fn wav_stats(
         &self,
         Parameters(p): Parameters<WavStatsParams>,
@@ -1204,7 +1266,16 @@ impl EditorMcp {
     #[tool(
         description = "Set a node setting (the SetField command). `value` may be \
         a number (most fields), a string (a choice/text field like an oscillator \
-        `type`), or a bool — the field type is inferred from the JSON value."
+        `type`), or a bool — the field type is inferred from the JSON value. \
+        For an AudioParam field (gain, filter frequency/Q/detune/gain, oscillator \
+        frequency/detune, delay_time, worklet params, output gain) this sets the \
+        param's BASE value; if that param also has a `set_automation` timeline, \
+        the timeline drives the rendered value and this base only applies before \
+        the first event (read it back with get_node_fields `automation`). Note for \
+        a sequencer-triggered voice the played note overrides an oscillator's \
+        `frequency` (see docs/instruments). Acts by node id regardless of which \
+        sample is the active canvas, and errors (never a silent ok) if the node id \
+        exists in no sample."
     )]
     async fn set_field(
         &self,
@@ -1298,6 +1369,41 @@ impl EditorMcp {
             events: p.events,
         })
         .await
+    }
+
+    #[tool(
+        description = "Batch form of set_automation: set many AudioParam timelines \
+        (across one or more nodes/samples) in a single round-trip. Pass `items`, \
+        each `{node, param, events}`. Cuts the per-param round-trips of authoring a \
+        full envelope/automation pass. Returns per-item ok/error."
+    )]
+    async fn set_automations(
+        &self,
+        Parameters(p): Parameters<SetAutomationsParams>,
+    ) -> Result<CallToolResult, McpError> {
+        if p.items.is_empty() {
+            return Err(McpError::invalid_params(
+                "set_automations needs a non-empty `items` array",
+                None,
+            ));
+        }
+        let cmds: Vec<EditorCommand> = p
+            .items
+            .into_iter()
+            .map(|it| EditorCommand::SetAutomation {
+                id: it.node,
+                param: it.param,
+                events: it.events,
+            })
+            .collect();
+        match self.req(Request::DispatchBatch(cmds)).await? {
+            Response::Batch(items) => Ok(text(
+                serde_json::json!({ "ok": true, "results": items }).to_string(),
+            )),
+            Response::Ok => Ok(text(serde_json::json!({ "ok": true }).to_string())),
+            Response::Err(e) => Err(McpError::internal_error(e, None)),
+            other => Err(unexpected(other)),
+        }
     }
 
     #[tool(description = "Replace all notes on one Note Sequencer track in one \
@@ -1399,6 +1505,40 @@ impl EditorMcp {
                 e
             })
             .collect();
+        self.dispatch(EditorCommand::EditSong {
+            node: p.node,
+            op: SongOp::SetTrackEvents {
+                track: p.track,
+                events,
+            },
+        })
+        .await
+    }
+
+    #[tool(
+        description = "Apply a neutral swing/shuffle timing offset to one Note \
+        Sequencer track: every off-grid note (the off-beats of `grid_beats`) is \
+        delayed toward the next downbeat by `(2*ratio - 1) * grid_beats`. This is \
+        the mechanism only — YOU pick the grid (e.g. 0.5 = eighths), the ratio \
+        (0.5 = straight, 0.667 = triplet feel), and whether to use it at all; there \
+        is no built-in groove preset. Deterministic (unlike humanize_track's \
+        jitter). Compose with humanize_track for feel + variation."
+    )]
+    async fn swing_track(
+        &self,
+        Parameters(p): Parameters<SwingTrackParams>,
+    ) -> Result<CallToolResult, McpError> {
+        if p.grid_beats <= 0.0 {
+            return Err(McpError::invalid_params(
+                "grid_beats must be greater than 0",
+                None,
+            ));
+        }
+        let events = match self.query_result(EditorQuery::Snapshot).await? {
+            QueryResult::Snapshot(s) => snapshot_track_events(&s, p.node, p.track)?,
+            other => return Err(unexpected_query(other)),
+        };
+        let events = apply_swing(events, p.grid_beats, p.ratio);
         self.dispatch(EditorCommand::EditSong {
             node: p.node,
             op: SongOp::SetTrackEvents {
@@ -1542,9 +1682,11 @@ impl EditorMcp {
         `duration_secs` to instead render and store an exact unfolded span (e.g. \
         a fixed window of a procedural / worklet / buffer source). Blocks until \
         the render lands or a ~30 s safety timeout (no manual polling), then \
-        returns {stored_duration_secs, rendered_duration_secs, peak, rms, \
-        clipping} — so you see immediately whether it clipped (peak > 1.0) \
-        without a separate wav_stats call. On timeout it returns the last \
+        returns {stored_duration_secs, rendered_duration_secs, peak, true_peak, \
+        rms, clipping} — so you see immediately whether it clipped (peak > 1.0) \
+        without a separate wav_stats call. When it clips (e.g. N stacked voices \
+        sum hot) the result also includes `suggested_gain` (a level scale to apply \
+        and re-bounce) and a `hint`. On timeout it returns the last \
         status; re-check get_bounce_status / list_assets."
     )]
     async fn bounce(
@@ -1601,22 +1743,36 @@ impl EditorMcp {
                     QueryResult::WavStats(s) => s,
                     other => return Err(unexpected_query(other)),
                 };
-                return Ok(text(
-                    serde_json::json!({
-                        "status": "clean",
-                        "sample": p.sample,
-                        // What plays from arrangements (the stored asset)…
-                        "stored_duration_secs": stats.duration_secs,
-                        // …vs what the offline render ran (loop + tail for a
-                        // sequence; identical when duration_secs was passed).
-                        "rendered_duration_secs": rendered_duration,
-                        "duration_secs": stats.duration_secs,
-                        "peak": stats.peak,
-                        "rms": stats.rms,
-                        "clipping": stats.clipping,
-                    })
-                    .to_string(),
-                ));
+                // Hot-stack hint (#4): when the bounce clips (N simultaneous voices
+                // sum past 1.0), suggest a gain scale to apply and re-bounce, so the
+                // agent needn't find it by trial. Neutral arithmetic; where to apply
+                // it (sequencer output_gain / a pre-output gain / track gain) is the
+                // agent's call.
+                let suggested_gain = suggested_gain_for_peak(stats.peak);
+                let mut result = serde_json::json!({
+                    "status": "clean",
+                    "sample": p.sample,
+                    // What plays from arrangements (the stored asset)…
+                    "stored_duration_secs": stats.duration_secs,
+                    // …vs what the offline render ran (loop + tail for a
+                    // sequence; identical when duration_secs was passed).
+                    "rendered_duration_secs": rendered_duration,
+                    "duration_secs": stats.duration_secs,
+                    "peak": stats.peak,
+                    "true_peak": stats.true_peak,
+                    "rms": stats.rms,
+                    "clipping": stats.clipping,
+                });
+                if let Some(g) = suggested_gain {
+                    result["suggested_gain"] = serde_json::json!(g);
+                    result["hint"] = serde_json::json!(format!(
+                        "peak {:.3} clips (>1.0): scale the level by ~{g} (e.g. \
+                         sequencer output_gain, a pre-output gain node, or arrangement \
+                         track gain) and re-bounce.",
+                        stats.peak
+                    ));
+                }
+                return Ok(text(result.to_string()));
             }
             // Fail fast instead of waiting out the timeout when the render crashed
             // (e.g. an offline-unsupported node). The status names the offender.
@@ -2279,6 +2435,87 @@ impl EditorMcp {
     }
 
     #[tool(
+        description = "Generate N non-identical bounced variations of a Sound — the \
+        SFX deliverable (footsteps, impacts, UI clicks, debris): clones the Sound \
+        `count` times, re-seeds every `noise` source in each clone with a distinct \
+        deterministic seed, and bounces each. Same `seed_base` + same Sound \
+        reproduces the set. Returns one entry per variation \
+        {sample, name, peak, rms, clipping, suggested_gain}. Variation comes only \
+        from stochastic (noise) sources; a Sound with no noise yields identical \
+        clones (vary it another way — e.g. distinct authored Sounds). Restores the \
+        previously active sample. No arrangement needed."
+    )]
+    async fn bounce_variations(
+        &self,
+        Parameters(p): Parameters<BounceVariationsParams>,
+    ) -> Result<CallToolResult, McpError> {
+        let count = p.count.clamp(1, 32);
+        let seed_base = p.seed_base.unwrap_or(1);
+        let prefix = p.name_prefix.as_deref().unwrap_or("variation");
+        // Serialize against the session-global active sample (we clone + bounce,
+        // which moves the active canvas) and restore it afterward.
+        let (_guard, _waited) = self.active_sample_guard().await;
+        let previous = self.active_sample_id().await.ok();
+
+        let mut variations: Vec<Value> = Vec::with_capacity(count as usize);
+        for i in 0..count {
+            // Clone the source (the clone becomes the active canvas).
+            let clone_id = self
+                .dispatch_created(EditorCommand::CloneSample { id: p.sample })
+                .await?
+                .ok_or_else(|| {
+                    McpError::invalid_params(format!("no sample {} to vary", p.sample), None)
+                })?;
+            let clone: SampleId = parse_sample_id(&clone_id)?;
+            let name = format!("{prefix} {}", i + 1);
+            self.dispatch(EditorCommand::RenameSample {
+                id: clone,
+                name: name.clone(),
+            })
+            .await?;
+            // Re-seed every noise source in the clone with a distinct seed.
+            let snap = match self.query_result(EditorQuery::Snapshot).await? {
+                QueryResult::Snapshot(s) => serde_json::to_value(&*s)
+                    .map_err(|e| McpError::internal_error(format!("encode snapshot: {e}"), None))?,
+                other => return Err(unexpected_query(other)),
+            };
+            let noise_ids = noise_node_ids(&snap);
+            for (j, node) in noise_ids.iter().enumerate() {
+                let seed = variation_seed(seed_base, i as u64 * 991 + j as u64);
+                self.dispatch(EditorCommand::SetField {
+                    id: *node,
+                    key: "seed".into(),
+                    value: FieldValue::Num(seed as f64),
+                })
+                .await?;
+            }
+            let stats = self.bounce_blocking(clone, None).await?;
+            variations.push(serde_json::json!({
+                "sample": clone,
+                "name": name,
+                "peak": stats.peak,
+                "rms": stats.rms,
+                "clipping": stats.clipping,
+                "suggested_gain": suggested_gain_for_peak(stats.peak),
+                "noise_sources_reseeded": noise_ids.len(),
+            }));
+        }
+        // Restore the active sample the caller started on.
+        if let Some(prev) = previous {
+            let _ = self.set_active_sample_raw(prev).await;
+        }
+        Ok(text(
+            serde_json::json!({
+                "ok": true,
+                "source": p.sample,
+                "count": count,
+                "variations": variations,
+            })
+            .to_string(),
+        ))
+    }
+
+    #[tool(
         description = "Render two samples and return their stats side by side \
         plus deltas (peak/RMS in dB, durations) — A/B a fork made with \
         duplicate_sample, or any two Sounds. Pass duration_secs so both sides \
@@ -2531,7 +2768,11 @@ impl EditorMcp {
         description = "Render a Sound/Arrangement offline and write the `.wav` to \
         a path you choose — the durable form of render_wav (which writes a temp \
         file). Omit `sample` to export the project root. A directory path gets \
-        `<sample-name>.wav` appended. Returns the written path + stats."
+        `<sample-name>.wav` appended. Returns the written path + stats. To apply a \
+        master/output chain (glue/limiter/saturation/EQ) — which an Arrangement \
+        can't host directly — export_wav the mix, then load_audio it into a new \
+        Sound, run it through your chain, and bounce (the two-stage master pattern \
+        in awsm-audio://docs/track-workflow). Works for a final SFX limiter too."
     )]
     async fn export_wav(
         &self,
@@ -3179,8 +3420,10 @@ impl EditorMcp {
         existing AudioBufferSource (or Convolver) node's buffer. add_node an \
         audio_buffer_source first, then load_audio onto it, then connect it. \
         Provide exactly one of `path` (an agent-local file — the server hosts it \
-        and the editor fetches it off the link) or `url` (a browser-reachable \
-        URL). Bytes never cross the editor link. Returns the decoded duration / \
+        and the editor fetches it off the link) or `url` (a browser-reachable URL; \
+        works from CORS-open hosts). Bytes never cross the editor link. WHICH audio \
+        to load is your decision — the server is source-agnostic and endorses no \
+        particular sample source or URL. Returns the decoded duration / \
         sample-rate / channel count; render_wav / waveform to inspect it."
     )]
     async fn load_audio(
@@ -3519,6 +3762,62 @@ impl EditorMcp {
         self.dispatch(EditorCommand::EditArrange { op }).await
     }
 
+    /// Kick off a bounce and block until the asset lands (or a ~30 s safety
+    /// timeout), then return its stored-bounce stats. Errors on a failed render or
+    /// a timeout. Shared by the variation generator.
+    async fn bounce_blocking(
+        &self,
+        sample: SampleId,
+        duration_secs: Option<f64>,
+    ) -> Result<awsm_audio_editor_protocol::WavStats, McpError> {
+        use std::time::{Duration, Instant};
+        self.dispatch(EditorCommand::Bounce {
+            sample,
+            duration_secs,
+        })
+        .await?;
+        let timeout = Duration::from_secs(30);
+        let start = Instant::now();
+        loop {
+            let status = match self
+                .query_result(EditorQuery::BounceStatus { sample })
+                .await?
+            {
+                QueryResult::BounceStatus(s) => s,
+                other => return Err(unexpected_query(other)),
+            };
+            if status == "clean" {
+                return match self
+                    .query_result(EditorQuery::WavStats {
+                        sample: Some(sample),
+                        bounced: true,
+                        duration_secs: None,
+                    })
+                    .await?
+                {
+                    QueryResult::WavStats(s) => Ok(s),
+                    other => Err(unexpected_query(other)),
+                };
+            }
+            if status.starts_with("failed") {
+                return Err(McpError::internal_error(
+                    format!("bounce {status} for {sample}"),
+                    None,
+                ));
+            }
+            if start.elapsed() >= timeout {
+                return Err(McpError::internal_error(
+                    format!(
+                        "bounce still '{status}' after {}s for {sample}",
+                        timeout.as_secs()
+                    ),
+                    None,
+                ));
+            }
+            tokio::time::sleep(Duration::from_millis(150)).await;
+        }
+    }
+
     /// Resolve a sequencer output key (e.g. `"t2:n36"`) to its index in node
     /// `from`'s `outputs`, by reading the current snapshot. Errors if the node or
     /// key isn't found (listing the available keys).
@@ -3683,7 +3982,13 @@ impl ServerHandler for EditorMcp {
              (every sample + which is root/active) and get_snapshot (the ACTIVE \
              sample's canvas — nodes + connections, each wire with a stable id for \
              disconnect); get_snapshot only shows the active canvas, so use \
-             list_samples + set_active_sample to navigate a multi-sample project. \
+             list_samples + set_active_sample to navigate a multi-sample project \
+             (node-targeting edits — set_field, set_automation, edit_song — act by \
+             node id across samples, so you needn't switch active first; an id in \
+             no sample errors rather than silently succeeding). set_field on an \
+             AudioParam sets its base value; a set_automation timeline overrides it \
+             when rendering, and get_node_fields shows both so you can read the \
+             effective value. \
              Mutate with the graph/sequencer/arrangement tools (or dispatch_command / \
              dispatch_batch for anything without a dedicated tool), bounce a Sound \
              and call wav_stats / waveform to inspect the result (prefer these over \
@@ -3696,7 +4001,23 @@ impl ServerHandler for EditorMcp {
              nonlinearities, or custom synthesis (not chorus/phaser/distortion, \
              which are delay/all-pass/waveshaper). Use scaffold_worklet to emit a \
              ready-to-build crate, then attach_wasm the compiled .wasm (read \
-             awsm-audio://docs/worklet-abi for the ABI).\n\n\
+             awsm-audio://docs/worklet-abi for the ABI). That 'built-ins first' rule \
+             is about EFFORT, not about how distinctive the result can be: for a \
+             brief that wants a distinctive, organic, or signature character (SFX or \
+             music), real samples (load_audio) and/or a worklet are often the FIRST \
+             tools to reach for, not the last — an oscillator+filter+shaper stack \
+             tends to sound synthetic. (Which samples and what DSP are your call; the \
+             server stays source- and style-agnostic.) These escape hatches are \
+             available, not exotic: the Rust->wasm worklet toolchain \
+             (wasm32-unknown-unknown) and load_audio from a local path or a \
+             CORS-open URL both work — treat them as step-zero options. \
+             Verification caveat: wav_stats / waveform measure LEVEL (peak, RMS, \
+             clipping, centroid), not character, feel, or whether the sound is the \
+             intended object — a 'clean, peak 0.94' bounce can still be synthetic, \
+             grooveless, or just not read as the thing you meant (a 'laser' that's a \
+             buzz). Don't treat clean stats as success for a creative brief; render a \
+             few seconds early and get the user's reaction before building out the \
+             full SFX set or arrangement.\n\n\
              For a song / full-track request, work arrangement-first instead \
              of one monolithic root sequencer: build and bounce each part as its own \
              short loop Sound, then create_arrangement and place clips into sections — \
@@ -4250,6 +4571,17 @@ A compile error here is yours to fix — it shows up in your own build output.
 
 A module that compiles but violates the ABI returns the error from `attach_wasm`.
 
+## Pitch tracking
+
+A worklet voice does **not** receive the played note's pitch. When a sequencer
+triggers an instrument it transposes only oscillator `frequency` (by
+`note − 60` semitones); a worklet's params are left at their authored values for
+every note (see `awsm-audio://docs/instruments`). So a worklet is fixed-pitch under
+the sequencer — great for textures, drums, effects, and per-sample DSP, but it
+can't follow a melody from the note number alone. If you need a pitched worklet
+voice, expose a `frequency` (or similar) param and drive it yourself with
+`set_automation`, or place it on a single pitch.
+
 ## 4. Driving a worklet source for a real duration
 
 A worklet used directly as a *source* Sound often renders only a tiny default
@@ -4301,6 +4633,25 @@ adds is how the pieces fit together in this editor.
    bounces, `bounce_all_dirty` to fix them, then `render_wav` / `wav_stats` on the
    arrangement (watch for clipping from overlapping clips).
 
+## Master / output processing (glue, limiter, saturation, EQ)
+
+An Arrangement can't host a node graph, so it has no built-in master insert. Two
+neutral ways to apply an output/master stage with the existing primitives:
+
+- **Per-part inserts (in-arrangement):** put the processor (a `gain`, a
+  `dynamics_compressor`, a `waveshaper`, a `biquad_filter`) *before each part's
+  outlet* inside its Sound, then bounce. Best when each stem wants its own
+  treatment. Use `arrangement_track_stats` to see which stem is hot first.
+- **Two-stage master bounce (true master bus):** `export_wav` the finished
+  arrangement, then in a new Sound `add_node` an `audio_buffer_source` +
+  `load_audio` that file, run it through your master chain (e.g. compressor →
+  waveshaper → highpass `biquad_filter` for glue/limiting/DC removal), and `bounce`
+  the result. This gives a single processing chain over the whole mix.
+
+This is **not only a music need**: the same two-stage bounce is how you put a final
+limiter/EQ on an individual SFX, or normalize a batch of one-shots through one
+shared chain. Keep the chain your choice — the tool supplies the nodes, not a preset.
+
 ## What's yours vs. what's the tool's
 
 - **Yours (your knowledge):** genre, tempo, swing/feel, which instruments, how the
@@ -4330,8 +4681,30 @@ pitch for the note's length, and routes the outlet to the mix.
 - A Sound with **no** outlet boundary just auditions its loose ends to master — fine
   for sound-design, but to be *played by a sequencer* it needs the outlet.
 - The trigger sets the voice's pitch (from the note number) and gate length (from
-  the note's length). Sources that respond to pitch (oscillator frequency) track
-  the note; others (noise, samples) just start/stop.
+  the note's length). Which sources actually follow the pitch is spelled out next.
+
+## Pitch tracking — which sources follow the note (and which don't)
+
+A sequencer triggers a voice by **transposing the instrument graph by
+`note − 60` semitones** (MIDI note 60 = unison). Only **oscillators** are
+transposed:
+
+- **Oscillator** — both `frequency` (its base value *and* any automation) are
+  scaled by `2^((note−60)/12)`. So the authored `frequency` is the voice's pitch
+  **at note 60**, and every played note is *relative* to it — author it as your
+  root/reference pitch, and don't expect a given note number to map to an absolute
+  Hz. (`detune` adds cents on top.) For a fixed pitch-drop envelope (e.g. a kick),
+  the whole envelope transposes with the note, keeping its shape. This is also why,
+  for a sequenced oscillator, the authored base `frequency` looks "ignored" if you
+  read it back expecting the note's Hz — it's the reference, not the result.
+- **audio_buffer_source, audio_worklet, noise** — **do NOT pitch-track.** A sampled
+  voice plays at its authored `playback_rate`/`detune`, and a worklet at its
+  authored params, regardless of the note number; the note only gates start/stop
+  and length. This is fine (often desirable) for drums, one-shots, textures, and
+  most SFX. But it means you **cannot** build a melodic sampler or a melodic worklet
+  voice that follows the sequencer purely from the note number — use an oscillator
+  source for melodic content, or drive pitch yourself (per-clip `transpose`, or
+  authoring distinct Sounds/automation per pitch).
 
 ## Envelope timing (AudioParam automation)
 
@@ -4553,6 +4926,73 @@ fn parse_node_id(s: &str) -> Result<NodeId, McpError> {
 fn parse_sample_id(s: &str) -> Result<SampleId, McpError> {
     s.parse::<SampleId>()
         .map_err(|e| McpError::internal_error(format!("bad sample id {s}: {e}"), None))
+}
+
+/// A suggested output-gain scale to bring a hot bounce under the ceiling, leaving
+/// a little headroom (target ~0.95). `None` when the peak is already safe. Neutral
+/// arithmetic — the caller decides whether/where to apply it (a sequencer
+/// output_gain, a pre-output gain node, or arrangement track gain).
+fn suggested_gain_for_peak(peak: f32) -> Option<f32> {
+    const TARGET: f32 = 0.95;
+    if peak > 1.0 && peak.is_finite() {
+        // Round to 3 decimals so the hint reads cleanly.
+        Some(((TARGET / peak) * 1000.0).round() / 1000.0)
+    } else {
+        None
+    }
+}
+
+/// A distinct, reproducible seed for one (variation, noise-node) slot — used by
+/// `bounce_variations` to re-seed stochastic sources so each variation differs but
+/// the set is deterministic. Clamped to the TOML-savable noise-seed range.
+fn variation_seed(base: u64, slot: u64) -> u64 {
+    // Golden-ratio odd constant spreads consecutive slots across the range.
+    base.wrapping_add(slot.wrapping_mul(0x9E37_79B9_7F4A_7C15)) % (MAX_NOISE_SEED + 1)
+}
+
+/// The node ids of every `noise` node in a serialized snapshot's active graph —
+/// the stochastic sources `bounce_variations` re-seeds.
+fn noise_node_ids(snapshot: &Value) -> Vec<NodeId> {
+    snapshot
+        .pointer("/graph/nodes")
+        .and_then(Value::as_array)
+        .map(|nodes| {
+            nodes
+                .iter()
+                .filter(|n| n.pointer("/kind/kind").and_then(Value::as_str) == Some("noise"))
+                .filter_map(|n| n.get("id").and_then(Value::as_str))
+                .filter_map(|s| s.parse::<NodeId>().ok())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Apply a neutral swing offset to note starts: delay every off-grid note toward
+/// the next downbeat by `(2*ratio - 1) * grid_beats`. A note's grid position is
+/// the nearest multiple of `grid_beats`; odd positions (the off-beats) are the
+/// ones delayed. `ratio = 0.5` is straight (no change). Pure math, so the server
+/// only applies the offset — the grid, the ratio, and whether to swing at all are
+/// the caller's musical decision (no built-in groove preset).
+fn apply_swing(events: Vec<NoteEvent>, grid_beats: f64, ratio: f64) -> Vec<NoteEvent> {
+    if grid_beats <= 0.0 {
+        return events;
+    }
+    let r = ratio.clamp(0.5, 1.0);
+    let delay = (2.0 * r - 1.0) * grid_beats;
+    if delay == 0.0 {
+        return events;
+    }
+    events
+        .into_iter()
+        .map(|mut e| {
+            // Nearest grid index; odd indices are the off-beats that get delayed.
+            let idx = (e.start / grid_beats).round() as i64;
+            if idx.rem_euclid(2) == 1 {
+                e.start = (e.start + delay).max(0.0);
+            }
+            e
+        })
+        .collect()
 }
 
 fn snapshot_track_events(
@@ -5150,6 +5590,92 @@ mod tests {
         ]))
         .expect("documented automation event shapes decode");
         assert_eq!(events.len(), 5);
+    }
+
+    #[test]
+    fn variation_seeds_are_distinct_and_in_range() {
+        let seeds: Vec<u64> = (0..16).map(|i| variation_seed(7, i)).collect();
+        for s in &seeds {
+            assert!(*s <= MAX_NOISE_SEED, "seed {s} within savable range");
+        }
+        let unique: std::collections::HashSet<_> = seeds.iter().collect();
+        assert_eq!(
+            unique.len(),
+            seeds.len(),
+            "consecutive slots give distinct seeds"
+        );
+        // Deterministic.
+        assert_eq!(variation_seed(7, 3), variation_seed(7, 3));
+    }
+
+    #[test]
+    fn noise_node_ids_picks_only_noise() {
+        let snap = serde_json::json!({
+            "graph": { "nodes": [
+                { "id": "11111111-1111-1111-1111-111111111111",
+                  "kind": { "kind": "noise", "props": { "seed": 1 } } },
+                { "id": "22222222-2222-2222-2222-222222222222",
+                  "kind": { "kind": "gain", "props": { "gain": { "value": 1.0 } } } },
+            ]}
+        });
+        let ids = noise_node_ids(&snap);
+        assert_eq!(ids.len(), 1, "only the noise node is returned");
+        assert_eq!(ids[0].to_string(), "11111111-1111-1111-1111-111111111111");
+    }
+
+    #[test]
+    fn suggested_gain_only_when_hot() {
+        assert_eq!(suggested_gain_for_peak(0.9), None);
+        assert_eq!(suggested_gain_for_peak(1.0), None);
+        // peak 3.7 → ~0.95/3.7 ≈ 0.257 (the report's worked example).
+        let g = suggested_gain_for_peak(3.7).expect("hot peak suggests a gain");
+        assert!((g - 0.257).abs() < 0.005, "suggested gain {g}");
+        // Applying the suggestion brings the peak back under 1.0.
+        assert!(3.7 * g <= 1.0);
+        assert_eq!(suggested_gain_for_peak(f32::INFINITY), None);
+    }
+
+    #[test]
+    fn swing_delays_offbeats_only() {
+        // Eighth-note grid (0.5), triplet-ish ratio 0.667 → delay = (2*.667-1)*.5
+        // = 0.167. Downbeats (idx 0,2) unchanged; off-beats (idx 1,3) delayed.
+        let n = |start: f64| NoteEvent {
+            start,
+            length: 0.25,
+            note: 60,
+            velocity: 100,
+        };
+        let out = apply_swing(vec![n(0.0), n(0.5), n(1.0), n(1.5)], 0.5, 0.667);
+        assert!((out[0].start - 0.0).abs() < 1e-9, "downbeat 0 unchanged");
+        assert!(
+            (out[1].start - 0.667).abs() < 1e-3,
+            "offbeat delayed: {}",
+            out[1].start
+        );
+        assert!((out[2].start - 1.0).abs() < 1e-9, "downbeat 2 unchanged");
+        assert!(
+            (out[3].start - 1.667).abs() < 1e-3,
+            "offbeat delayed: {}",
+            out[3].start
+        );
+    }
+
+    #[test]
+    fn swing_straight_ratio_is_identity() {
+        let n = |start: f64| NoteEvent {
+            start,
+            length: 0.25,
+            note: 60,
+            velocity: 100,
+        };
+        let input = vec![n(0.0), n(0.5), n(1.0)];
+        let out = apply_swing(input.clone(), 0.5, 0.5);
+        for (a, b) in input.iter().zip(out.iter()) {
+            assert_eq!(a.start, b.start, "ratio 0.5 leaves starts unchanged");
+        }
+        // A non-positive grid is a no-op (guarded), not a panic.
+        let out2 = apply_swing(input.clone(), 0.0, 0.7);
+        assert_eq!(out2.len(), input.len());
     }
 
     #[test]
