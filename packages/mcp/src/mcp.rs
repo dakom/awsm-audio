@@ -2768,7 +2768,11 @@ impl EditorMcp {
         description = "Render a Sound/Arrangement offline and write the `.wav` to \
         a path you choose — the durable form of render_wav (which writes a temp \
         file). Omit `sample` to export the project root. A directory path gets \
-        `<sample-name>.wav` appended. Returns the written path + stats."
+        `<sample-name>.wav` appended. Returns the written path + stats. To apply a \
+        master/output chain (glue/limiter/saturation/EQ) — which an Arrangement \
+        can't host directly — export_wav the mix, then load_audio it into a new \
+        Sound, run it through your chain, and bounce (the two-stage master pattern \
+        in awsm-audio://docs/track-workflow). Works for a final SFX limiter too."
     )]
     async fn export_wav(
         &self,
@@ -4628,6 +4632,25 @@ adds is how the pieces fit together in this editor.
 5. Before exporting: `arrangement_bounce_report` to spot stale/missing clip
    bounces, `bounce_all_dirty` to fix them, then `render_wav` / `wav_stats` on the
    arrangement (watch for clipping from overlapping clips).
+
+## Master / output processing (glue, limiter, saturation, EQ)
+
+An Arrangement can't host a node graph, so it has no built-in master insert. Two
+neutral ways to apply an output/master stage with the existing primitives:
+
+- **Per-part inserts (in-arrangement):** put the processor (a `gain`, a
+  `dynamics_compressor`, a `waveshaper`, a `biquad_filter`) *before each part's
+  outlet* inside its Sound, then bounce. Best when each stem wants its own
+  treatment. Use `arrangement_track_stats` to see which stem is hot first.
+- **Two-stage master bounce (true master bus):** `export_wav` the finished
+  arrangement, then in a new Sound `add_node` an `audio_buffer_source` +
+  `load_audio` that file, run it through your master chain (e.g. compressor →
+  waveshaper → highpass `biquad_filter` for glue/limiting/DC removal), and `bounce`
+  the result. This gives a single processing chain over the whole mix.
+
+This is **not only a music need**: the same two-stage bounce is how you put a final
+limiter/EQ on an individual SFX, or normalize a batch of one-shots through one
+shared chain. Keep the chain your choice — the tool supplies the nodes, not a preset.
 
 ## What's yours vs. what's the tool's
 

@@ -100,7 +100,14 @@ closest-safe behavior was chosen instead).
   (grid_beats + ratio) backed by the pure `apply_swing` (delays off-grid notes by
   `(2*ratio-1)*grid`). Style-agnostic: the server only does the offset math, no
   preset. Tests `swing_delays_offbeats_only`, `swing_straight_ratio_is_identity`.
-- [ ] #10 No arrangement-level / output-stage processing (master insert chain) — TODO
+- [x] #10 No arrangement-level / output-stage processing — DONE (closest-safe): a
+  native arrangement insert-graph is a large render-path/wasm feature that can't be
+  e2e-verified in this environment, so per the guardrails I documented the neutral
+  two-stage master-bounce workflow (export_wav the mix → load_audio into a Sound →
+  master chain → bounce) and per-part inserts, in TRACK_WORKFLOW_DOC + the export_wav
+  description. Covers music (glue/limiter) and SFX (final limiter / batch normalize)
+  with existing primitives; the chain stays the agent's choice. Rationale: deferring
+  the native master graph avoids regressing the render path blind.
 - [x] #11 Batch param setting — DONE: added `set_automations` (many `{node,param,events}`
   in one DispatchBatch round-trip, per-item ok/error; cross-sample via dispatch_remote).
   Inline AudioParam values in add_node/add_chain props already stick now that #1 is fixed.
@@ -114,11 +121,16 @@ closest-safe behavior was chosen instead).
   wav_stats.dc_offset reports it, and that a highpass biquad_filter (~5–20 Hz) after
   the shaper removes it (a built-in already expresses a DC blocker). Avoided a render-path
   change (wasm-only, untestable here) for the closest-safe neutral mechanism.
-- [ ] P3-b bounce auto-duration / get_render_plan praise — no change needed (verify + note) — TODO
-- [ ] P3-c worklet workflow praise — no change needed except pitch-tracking (covered by #5) — TODO
-- [x] P3-d `load_audio` source-agnostic note — DONE: description now says which audio
-  to load is the agent's decision (server endorses no source) + URLs work from CORS-open hosts.
-- [ ] P3-e `verify_arrangement` praise — no change needed (verify + note) — TODO
+- [x] P3-b bounce auto-duration / get_render_plan — DONE (verify, no change): `get_render_plan`
+  exists and `bounce` reads RenderPlan for rendered-vs-stored duration; duration_secs
+  override works. Working as praised.
+- [x] P3-c worklet workflow — DONE (verify, no change): worklet_cargo_toml / scaffold_worklet
+  / attach_wasm all present; the only gap (pitch-tracking) is now documented (#5).
+- [x] P3-d `load_audio` source-agnostic note — DONE: which audio to load is the agent's
+  decision (server endorses no source) + URLs work from CORS-open hosts.
+- [x] P3-e `verify_arrangement` — DONE (verify, no change): `arrangement_bounce_report`
+  (bounce-report + per-track solo + master stats + recommendations) and
+  `arrangement_gain_diagnostics` exist. Working as praised.
 
 ## Notes / decisions log
 
